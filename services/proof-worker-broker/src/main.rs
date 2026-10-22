@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use supernode_worker_broker_protocol::{
     hex_hash, read_header, write_header, RunReply, RunRequest, MAX_OUTPUT_BYTES,
     TRANSFER_CHUNK_BYTES, VERSION,
@@ -353,5 +355,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let config = Arc::clone(&config);
         tokio::spawn(serve_one(stream, config));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("supernode-broker-{label}-{}-{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn rejects_symlinked_and_oversized_broker_outputs() {
+        use std::os::unix::fs::symlink;
+        let root = temp_path("safe-files");
+        private_root(&root).unwrap();
+        let output = root.join("output.bin");
+        let original = root.join("original");
+        fs::write(&original, b"unverified-bytes").unwrap();
+        symlink(&original, &output).unwrap();
+        assert!(file_digest(&output, MAX_OUTPUT_BYTES).is_err());
+        fs::remove_file(&output).unwrap();
+
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&output)
+            .unwrap();
+        file.set_len(MAX_OUTPUT_BYTES + 1).unwrap();
+        assert!(file_digest(&output, MAX_OUTPUT_BYTES).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unsupported_job_is_rejected_without_launching_or_staging() {
+        let root = temp_path("bad-request");
+        private_root(&root).unwrap();
+        let socket = root.join("socket.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        let (incoming, _) = listener.accept().await.unwrap();
+        let config = Arc::new(Config {
+            socket,
+            root: root.clone(),
+            gateway_uid: nix::unistd::Uid::effective().as_raw(),
+            worker: root.join("missing-worker"),
+            worker_sha256: "ab".repeat(32),
+            fetch_config: root.join("missing-config"),
+            slots: Arc::new(Semaphore::new(1)),
+        });
+        let service = tokio::spawn(serve_one(incoming, config));
+        let req = RunRequest {
+            version: VERSION,
+            job_id: "12".repeat(32),
+            backend: "arbitrary".into(),
+            network: "main".into(),
+            block_hash: "34".repeat(32),
+            block_height: 900000,
+            policy_sha256: "56".repeat(32),
+            expected_txid: Some("78".repeat(32)),
+            input_bytes: 8,
+        };
+        write_header(&mut client, &req).await.unwrap();
+        let reply: RunReply = read_header(&mut client).await.unwrap();
+        assert!(!reply.ok);
+        assert!(reply.accepted().is_err());
+        service.await.unwrap();
+        assert!(!root.join(&req.job_id).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }
