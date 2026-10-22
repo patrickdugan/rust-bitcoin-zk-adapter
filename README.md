@@ -56,6 +56,11 @@ The raw sample is a documented Bitcoin mainnet transaction. See
 
 ## Architecture
 
+[Bitcoin Supernode architecture](docs/SUPERNODE_ARCHITECTURE.md) describes
+Bitcoin Core coexistence, proving-worker isolation, chain reorg handling,
+and the future Ark and Shinigami interfaces.
+
+
 See [Raito integration design](docs/RAITO_INTEGRATION.md) for the upstream
 verifier interfaces and an integration plan that reuses upstream proof logic.
 
