@@ -6,7 +6,6 @@
 //! source node and its canonical-chain view remain external trust assumptions.
 
 use bitcoin::consensus::deserialize;
-use bitcoin::hashes::Hash;
 use bitcoin::{block::Header, BlockHash, Transaction, TxMerkleNode, Txid};
 use serde::Deserialize;
 use std::str::FromStr;
