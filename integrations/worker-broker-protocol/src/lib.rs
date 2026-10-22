@@ -13,7 +13,9 @@ pub const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
 
 pub fn hex_hash(value: &str) -> bool {
     value.len() == 64
-        && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,12 +34,19 @@ pub struct RunRequest {
 
 impl RunRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != VERSION || !hex_hash(&self.job_id)
+        if self.version != VERSION
+            || !hex_hash(&self.job_id)
             || self.backend != "raito"
-            || !matches!(self.network.as_str(), "main" | "test" | "signet" | "regtest")
+            || !matches!(
+                self.network.as_str(),
+                "main" | "test" | "signet" | "regtest"
+            )
             || !hex_hash(&self.block_hash)
             || !hex_hash(&self.policy_sha256)
-            || self.expected_txid.as_deref().is_none_or(|txid| !hex_hash(txid))
+            || self
+                .expected_txid
+                .as_deref()
+                .is_none_or(|txid| !hex_hash(txid))
             || self.input_bytes == 0
             || self.input_bytes > MAX_INPUT_BYTES as u64
         {
@@ -59,13 +68,17 @@ pub struct RunReply {
 
 impl RunReply {
     pub fn accepted(&self) -> Result<(u64, &str), String> {
-        if self.version != VERSION || !self.ok
+        if self.version != VERSION
+            || !self.ok
             || !(1..=MAX_OUTPUT_BYTES).contains(&self.output_bytes)
             || self.error.is_some()
         {
             return Err("broker rejected worker or returned invalid output metadata".into());
         }
-        let sha = self.result_sha256.as_deref().ok_or("broker omitted output SHA-256")?;
+        let sha = self
+            .result_sha256
+            .as_deref()
+            .ok_or("broker omitted output SHA-256")?;
         if !hex_hash(sha) {
             return Err("broker returned malformed output digest".into());
         }
@@ -142,7 +155,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_large_frame_and_forged_verification_claim() {
         let (mut left, mut right) = tokio::io::duplex(8192);
-        left.write_all(&vec![b'a'; MAX_HEADER_BYTES + 1]).await.unwrap();
+        left.write_all(&vec![b'a'; MAX_HEADER_BYTES + 1])
+            .await
+            .unwrap();
         let response: Result<RunReply, _> = read_header(&mut right).await;
         assert!(response.is_err());
         let empty = RunReply::rejected("worker failed");

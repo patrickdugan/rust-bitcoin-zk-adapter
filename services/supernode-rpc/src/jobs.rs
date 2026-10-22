@@ -532,7 +532,6 @@ impl JobManager {
         }))
     }
 
-
     /// Select a separate-UID broker before the manager has any other owners.
     /// No direct worker binary may remain configured when isolation is on.
     #[cfg(unix)]
@@ -578,13 +577,16 @@ impl JobManager {
     }
 
     pub fn raito_worker_configured(&self) -> bool {
-        self.workers.enabled(&JobKind::Raito)
-            || {
-                #[cfg(unix)]
-                { self.broker.is_some() }
-                #[cfg(not(unix))]
-                { false }
+        self.workers.enabled(&JobKind::Raito) || {
+            #[cfg(unix)]
+            {
+                self.broker.is_some()
             }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
     }
 
     pub async fn status(&self, id: &str) -> Result<JobRecord, String> {
@@ -1147,7 +1149,8 @@ impl JobManager {
             self.set_status(&id, JobStatus::Running, None, None, None, None)
                 .await;
 
-            self.execute_worker(&record, &data, &input_path, &output_path).await?;
+            self.execute_worker(&record, &data, &input_path, &output_path)
+                .await?;
             self.check_chain(&record).await?;
             let (digest, size, index) = checked_result_digest(&output_path)?;
             let index_digest = hash_bytes(&index);

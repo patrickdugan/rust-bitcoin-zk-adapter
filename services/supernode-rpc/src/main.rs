@@ -1,11 +1,11 @@
 //! Locally bound authenticated Bitcoin Core RPC superset.
+#[cfg(unix)]
+use rust_bitcoin_supernode_rpc::broker::BrokerClient;
 use rust_bitcoin_supernode_rpc::cache::{ArtifactStore, MAX_STORE_BYTES};
 use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
 };
 use rust_bitcoin_supernode_rpc::jobs::{JobLimits, JobManager, WorkerPrograms};
-#[cfg(unix)]
-use rust_bitcoin_supernode_rpc::broker::BrokerClient;
 use rust_bitcoin_supernode_rpc::verification::RaitoVerifier;
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use std::sync::Arc;
@@ -97,7 +97,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 || env::var("SUPERNODE_SHINIGAMI_PROVER").is_ok())
             && env::var("SUPERNODE_ALLOW_SAME_UID_WORKERS").as_deref() != Ok("1")
         {
-            return Err("direct same-UID worker execution needs explicit development opt-in".into());
+            return Err(
+                "direct same-UID worker execution needs explicit development opt-in".into(),
+            );
         }
         let backend = WorkerPrograms {
             raito: env::var("SUPERNODE_RAITO_PROVER").ok().map(Into::into),

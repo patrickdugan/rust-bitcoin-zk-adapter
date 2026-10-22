@@ -5,10 +5,12 @@
 
 use crate::jobs::{JobKind, JobRecord};
 use bitcoin::hashes::{sha256, Hash, HashEngine};
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use supernode_worker_broker_protocol::{
-    read_header, write_header, RunReply, RunRequest, VERSION, MAX_INPUT_BYTES,
-    TRANSFER_CHUNK_BYTES,
+    read_header, write_header, RunReply, RunRequest, MAX_INPUT_BYTES, TRANSFER_CHUNK_BYTES, VERSION,
 };
 use tokio::{
     fs::OpenOptions,
@@ -30,7 +32,10 @@ impl BrokerClient {
         if !socket.is_absolute() || socket.to_string_lossy().len() > 512 {
             return Err("broker socket path must be an absolute, bounded Unix path".into());
         }
-        Ok(Self { socket, expected_uid })
+        Ok(Self {
+            socket,
+            expected_uid,
+        })
     }
 
     pub fn socket(&self) -> &Path {
@@ -39,12 +44,7 @@ impl BrokerClient {
 
     /// Run the approved Raito backend through the dedicated lower-trust
     /// service, importing its bytes into a gateway-owned output file.
-    pub async fn run(
-        &self,
-        record: &JobRecord,
-        input: &[u8],
-        output: &Path,
-    ) -> Result<(), String> {
+    pub async fn run(&self, record: &JobRecord, input: &[u8], output: &Path) -> Result<(), String> {
         if record.kind != JobKind::Raito {
             return Err("isolated broker presently supports only Raito workers".into());
         }
@@ -78,7 +78,9 @@ impl BrokerClient {
         input: &[u8],
         output: &Path,
     ) -> Result<(), String> {
-        let mut stream = UnixStream::connect(&self.socket).await.map_err(|e| e.to_string())?;
+        let mut stream = UnixStream::connect(&self.socket)
+            .await
+            .map_err(|e| e.to_string())?;
         let peer = stream.peer_cred().map_err(|e| e.to_string())?;
         if peer.uid() != self.expected_uid {
             return Err("broker socket peer UID differs from operator-approved UID".into());
@@ -90,7 +92,10 @@ impl BrokerClient {
         if !reply.ok {
             return Err(format!(
                 "broker rejected job: {}",
-                reply.error.as_deref().unwrap_or("unspecified broker failure")
+                reply
+                    .error
+                    .as_deref()
+                    .unwrap_or("unspecified broker failure")
             ));
         }
         let (length, expected_sha) = reply.accepted()?;
@@ -107,9 +112,14 @@ impl BrokerClient {
         let mut buffer = [0u8; TRANSFER_CHUNK_BYTES];
         while remaining > 0 {
             let count = remaining.min(TRANSFER_CHUNK_BYTES as u64) as usize;
-            stream.read_exact(&mut buffer[..count]).await.map_err(|e| e.to_string())?;
+            stream
+                .read_exact(&mut buffer[..count])
+                .await
+                .map_err(|e| e.to_string())?;
             engine.input(&buffer[..count]);
-            file.write_all(&buffer[..count]).await.map_err(|e| e.to_string())?;
+            file.write_all(&buffer[..count])
+                .await
+                .map_err(|e| e.to_string())?;
             remaining -= count as u64;
         }
         file.sync_all().await.map_err(|e| e.to_string())?;
@@ -126,16 +136,19 @@ impl BrokerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::{JobStatus, JobRecord};
+    use crate::jobs::{JobRecord, JobStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::net::UnixListener;
     use supernode_worker_broker_protocol::{write_header, RunReply};
+    use tokio::net::UnixListener;
 
     fn temp_root() -> PathBuf {
         std::env::temp_dir().join(format!(
             "supernode-gateway-broker-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
     fn record() -> JobRecord {
@@ -178,16 +191,25 @@ mod tests {
             let mut input = vec![0u8; req.input_bytes as usize];
             peer.read_exact(&mut input).await.unwrap();
             assert_eq!(&input, b"input-manifest");
-            write_header(&mut peer, &RunReply {
-                version: VERSION, ok: true,
-                output_bytes: response.len() as u64,
-                result_sha256: Some(sha256::Hash::hash(&response).to_string()),
-                error: None,
-            }).await.unwrap();
+            write_header(
+                &mut peer,
+                &RunReply {
+                    version: VERSION,
+                    ok: true,
+                    output_bytes: response.len() as u64,
+                    result_sha256: Some(sha256::Hash::hash(&response).to_string()),
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
             peer.write_all(&response).await.unwrap();
         });
         let output = root.join("proof.out");
-        broker.run(&record(), b"input-manifest", &output).await.unwrap();
+        broker
+            .run(&record(), b"input-manifest", &output)
+            .await
+            .unwrap();
         task.await.unwrap();
         assert_eq!(std::fs::read(&output).unwrap(), payload);
         std::fs::remove_dir_all(root).unwrap();
@@ -204,7 +226,10 @@ mod tests {
         let task = tokio::spawn(async move {
             let _connection = listener.accept().await.unwrap();
         });
-        assert!(broker.run(&record(), b"input-manifest", &root.join("out")).await.is_err());
+        assert!(broker
+            .run(&record(), b"input-manifest", &root.join("out"))
+            .await
+            .is_err());
         task.await.unwrap();
         assert!(!root.join("out").exists());
         std::fs::remove_dir_all(root).unwrap();
