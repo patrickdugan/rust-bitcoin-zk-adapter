@@ -20,6 +20,7 @@ use tokio::sync::Semaphore;
 pub mod cache;
 pub mod chain;
 pub mod jobs;
+pub mod process;
 pub mod verification;
 
 pub const MAX_RPC_REQUEST_BYTES: usize = 64 * 1024;

@@ -295,3 +295,17 @@ inspection. Concurrent or duplicate verification requests are rejected.
 The method is designed for recovery after the gateway restarts mid-verification
 or when an operator fixes a policy/configuration problem. A fully evicted
 output must be regenerated or independently restored before verification.
+
+### Process-tree cleanup
+
+On Unix, the gateway launches approved proof-worker and verifier binaries in
+new process groups. A small RAII supervisor sends SIGKILL to the group when
+the worker finishes or the gateway task times out, is cancelled, or is
+dropped. This covers ordinary descendants of the optional Raito fetcher and
+its upstream `raito-spv-client`, preventing common orphan-process leaks.
+
+Programs that intentionally detach into separate sessions or process groups
+can escape this mechanism. Production deployments must additionally keep
+fetcher, verifier and their descendants inside OS-managed cgroups with hard
+memory, swap, disk and process-count limits. The optional cgroup preflight
+checks the inherited kernel boundary but never creates it.

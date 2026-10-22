@@ -20,7 +20,6 @@ use std::{
 use tokio::{
     process::Command,
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
-    time::timeout,
 };
 
 use crate::{
@@ -1032,10 +1031,7 @@ impl JobManager {
                 }
             }
 
-            let status = timeout(MAX_WORKER_DURATION, cmd.status())
-                .await
-                .map_err(|_| "worker runtime budget exceeded")?
-                .map_err(|err| err.to_string())?;
+            let status = crate::process::run_supervised(cmd, MAX_WORKER_DURATION).await?;
             if !status.success() {
                 return Err(format!("approved worker exited with status {status}"));
             }
@@ -1089,6 +1085,7 @@ impl JobManager {
 mod tests {
     use super::*;
     use crate::chain::ChainTracker;
+    use tokio::time::timeout;
 
     fn tmp(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

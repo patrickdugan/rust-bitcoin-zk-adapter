@@ -10,7 +10,7 @@ use std::{
     process::Stdio,
     time::Duration,
 };
-use tokio::{process::Command, time::timeout};
+use tokio::process::Command;
 
 pub const VERIFIER_ID: &str = "raito-spv-verify/48c237ac941d8061a857ecd111d7e81107912556";
 pub const STATEMENT: &str = "raito_spv_transaction_inclusion_v1";
@@ -104,10 +104,9 @@ impl RaitoVerifier {
             if let Some(limit) = std::env::var_os("SUPERNODE_REQUIRE_CGROUP_MAX_MIB") {
                 command.env("SUPERNODE_REQUIRE_CGROUP_MAX_MIB", limit);
             }
-            let status = timeout(VERIFICATION_TIMEOUT, command.status())
+            let status = crate::process::run_supervised(command, VERIFICATION_TIMEOUT)
                 .await
-                .map_err(|_| "Raito verifier exceeded execution timeout".to_string())?
-                .map_err(|e| e.to_string())?;
+                .map_err(|error| format!("Raito verifier: {error}"))?;
             if !status.success() {
                 return Err(format!("Raito verifier rejected proof: {status}"));
             }
