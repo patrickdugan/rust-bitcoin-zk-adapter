@@ -11,13 +11,15 @@ fn credential_pair() -> Result<(String, String), Box<dyn Error>> {
             .ok_or("invalid Bitcoin Core cookie format")?;
         return Ok((username.to_owned(), password.to_owned()));
     }
-    Ok((env::var("BITCOIN_RPC_USER")?, env::var("BITCOIN_RPC_PASSWORD")?))
+    Ok((
+        env::var("BITCOIN_RPC_USER")?,
+        env::var("BITCOIN_RPC_PASSWORD")?,
+    ))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let upstream = env::var("BITCOIN_RPC_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8332".into());
+    let upstream = env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://127.0.0.1:8332".into());
     let bind: SocketAddr = env::var("SUPERNODE_BIND")
         .unwrap_or_else(|_| "127.0.0.1:18444".into())
         .parse()?;
@@ -32,7 +34,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let core = CoreRpc::new(&upstream, username, password)?;
     let gateway = Gateway::new(core, token, max_inflight)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    eprintln!("Bitcoin supernode RPC listening at {}", listener.local_addr()?);
+    eprintln!(
+        "Bitcoin supernode RPC listening at {}",
+        listener.local_addr()?
+    );
     axum::serve(listener, router(gateway)).await?;
     Ok(())
 }
