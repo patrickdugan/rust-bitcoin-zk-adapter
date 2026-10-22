@@ -546,4 +546,105 @@ mod tests {
         assert_eq!(status.status, JobStatus::Interrupted);
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_worker_runs_and_receipt_is_explicitly_unverified() {
+        use axum::{routing::post, Json, Router};
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::net::TcpListener;
+
+        let directory = tmp("worker");
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("mock-approved-prover.sh");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ninput=\noutput=\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --input) input=\"$2\"; shift 2 ;;\n    --output) output=\"$2\"; shift 2 ;;\n    *) shift 2 ;;\n  esac\ndone\ncp \"$input\" \"$output\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let initial_hash = "ab".repeat(32);
+        let active_hash = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let hash = initial_hash.clone();
+        let active = active_hash.clone();
+        let server = Router::new().route(
+            "/",
+            post(move |Json(body): Json<Value>| {
+                let hash = hash.clone();
+                let active = active.clone();
+                async move {
+                    let result = if body["method"] == "getblockhash" {
+                        if active.load(std::sync::atomic::Ordering::SeqCst) {
+                            json!(hash)
+                        } else {
+                            json!("cc".repeat(32))
+                        }
+                    } else {
+                        Value::Null
+                    };
+                    Json(json!({"result":result,"error":null,"id":"supernode"}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rpc_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+
+        let cache = Arc::new(
+            ArtifactStore::new(directory.join("artifacts"), 4096).unwrap()
+        );
+        let content = b"synthetic-data-not-a-zk-proof";
+        let staged = cache.put(
+            "regtest",
+            &initial_hash,
+            100,
+            0,
+            "raito_input",
+            content,
+        ).await.unwrap();
+
+        let jobs = JobManager::new(
+            directory.join("jobs"),
+            cache,
+            CoreRpc::new(&rpc_url, "unit".into(), "test".into()).unwrap(),
+            Arc::new(ChainTracker::new(false)),
+            WorkerPrograms { raito: Some(executable), shinigami: None },
+            2,
+            1,
+        ).unwrap();
+        assert!(jobs.capabilities()["raito_worker_configured"].as_bool().unwrap());
+        assert!(jobs.submit("raito", &staged.id, 3, &"dd".repeat(32)).await.is_err());
+
+        let queued = jobs.submit("raito", &staged.id, 2, &"dd".repeat(32))
+            .await.unwrap();
+        let completed = timeout(Duration::from_secs(6), async {
+            loop {
+                let record = jobs.status(&queued.id).await.unwrap();
+                if !matches!(record.status, JobStatus::Queued | JobStatus::Running) {
+                    break record;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(completed.status, JobStatus::CompletedUnverified);
+        assert_eq!(completed.result_sha256, Some(hash_bytes(content)));
+
+        active_hash.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(jobs.check_chain(&completed).await.is_err());
+
+        let restarted = JobManager::new(
+            directory.join("jobs"),
+            Arc::new(ArtifactStore::new(directory.join("artifacts"),4096).unwrap()),
+            CoreRpc::new(&rpc_url,"unit".into(),"test".into()).unwrap(),
+            Arc::new(ChainTracker::new(false)),
+            WorkerPrograms::default(), 2, 1
+        ).unwrap();
+        assert_eq!(
+            restarted.status(&queued.id).await.unwrap().status,
+            JobStatus::CompletedUnverified
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
 }
