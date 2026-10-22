@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn refuses_bad_kind_and_dir_symlinks() {
         assert!(!is_safe_kind("../../bad"));
-        assert!(!is_safe_kind("uppercase"));
+        assert!(!is_safe_kind("UPPERCASE"));
         assert!(is_safe_kind("raito_input"));
     }
 }

@@ -42,8 +42,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         validate_local_sequence_endpoint(url)?;
     }
     let tracker = Arc::new(ChainTracker::new(endpoint.is_some()));
-    let gateway =
+    let mut gateway =
         Gateway::new(core.clone(), token, max_inflight)?.with_chain_tracker(tracker.clone());
+    if let Ok(root) = env::var("SUPERNODE_ARTIFACT_DIR") {
+        let bytes: u64 = env::var("SUPERNODE_ARTIFACT_BUDGET_BYTES")
+            .unwrap_or_else(|_| MAX_STORE_BYTES.to_string()).parse()?;
+        gateway = gateway.with_artifact_store(Arc::new(ArtifactStore::new(root.into(), bytes)?));
+    }
     if let Some(url) = endpoint {
         tokio::spawn(run_sequence_subscriber(url, tracker, core));
     }
