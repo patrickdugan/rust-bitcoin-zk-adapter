@@ -15,7 +15,7 @@ fn direct_and_pushdata_encodings_preserve_opaque_bytes() {
 }
 #[test]
 fn concatenates_multiple_pushes_without_protocol_interpretation() {
-    let script = b"\x6a\x02zk\x04proof\x00";
+    let script = b"\x6a\x02zk\x05proof\x00";
     assert_eq!(decode_op_return(script).unwrap(), b"zkproof");
 }
 #[test]

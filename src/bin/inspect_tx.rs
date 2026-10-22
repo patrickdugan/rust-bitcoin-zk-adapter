@@ -8,7 +8,7 @@ const MAX_HEX_FILE_BYTES: u64 = 8_000_000;
 fn parse_hex(source: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     let hex: String = source
         .chars()
-        .filter(|c| c.is_ascii_hexdigit())
+        .filter(|c| !c.is_ascii_whitespace())
         .collect();
     if !hex.len().is_multiple_of(2) {
         return Err("odd number of hex digits".into());
