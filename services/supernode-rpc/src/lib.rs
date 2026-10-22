@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use std::{str::FromStr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 pub mod cache;
+pub mod jobs;
 pub mod chain;
 
 pub const MAX_RPC_REQUEST_BYTES: usize = 64 * 1024;
@@ -141,6 +142,7 @@ pub struct Gateway {
     semaphore: Arc<Semaphore>,
     chain: Arc<chain::ChainTracker>,
     artifacts: Option<Arc<cache::ArtifactStore>>,
+    jobs: Option<Arc<jobs::JobManager>>,
 }
 
 impl Gateway {
@@ -157,7 +159,13 @@ impl Gateway {
             semaphore: Arc::new(Semaphore::new(max_inflight)),
             chain: Arc::new(chain::ChainTracker::new(false)),
             artifacts: None,
+            jobs: None,
         })
+    }
+
+    pub fn with_job_manager(mut self, manager: Arc<jobs::JobManager>) -> Self {
+        self.jobs = Some(manager);
+        self
     }
 
     pub fn with_artifact_store(mut self, store: Arc<cache::ArtifactStore>) -> Self {
@@ -303,6 +311,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
             "transaction_context":true,
             "bounded_spend_context":true,
             "content_addressed_artifact_cache":gateway.artifacts.is_some(),
+            "proof_jobs":match &gateway.jobs { Some(manager)=>manager.capabilities(), None=>json!({"queue_enabled":false}) },
             "zmq_sequence_tracking":gateway.chain.snapshot().await["sequence_zmq_enabled"],
             "bitcoin_merkle_proof_checked":true,
             "raito": {"proof_verifier_connected":false, "job_queue_connected":false},
@@ -318,6 +327,8 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
         }),
         "zk.artifact.put" => put_artifact(gateway, &params).await,
         "zk.artifact.get" => get_artifact(gateway, &params).await,
+        "zk.proof.submit" => submit_proof_job(gateway, &params).await,
+        "zk.proof.status" => proof_job_status(gateway, &params).await,
         "zk.chain.refresh" => gateway
             .chain
             .reconcile(core)
@@ -704,6 +715,38 @@ async fn get_artifact(gateway: &Gateway, params: &Value) -> Result<Value, RpcErr
     }
     Ok(json!({"artifact":meta,"data_hex":hex::encode(&data),
               "core_active_chain_at_lookup":true,"proof_verified":false}))
+}
+
+
+/// A bounded job request contains only predefined backend names and a
+/// pre-staged artifact; arbitrary processes and user-selected paths are
+/// never available through the gateway RPC.
+async fn submit_proof_job(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
+    let manager = gateway.jobs.as_ref()
+        .ok_or_else(|| RpcError::new(-32601, "proof job dispatcher not configured"))?;
+    let args = params.as_array().ok_or_else(|| RpcError::new(-32602, "expected [backend,artifact_id,memory_mib,policy_sha256]"))?;
+    if args.len() != 4 {
+        return Err(RpcError::new(-32602, "expected [backend,artifact_id,memory_mib,policy_sha256]"));
+    }
+    let backend = args[0].as_str().ok_or_else(|| RpcError::new(-32602, "invalid backend"))?;
+    let artifact = args[1].as_str().ok_or_else(|| RpcError::new(-32602, "invalid artifact id"))?;
+    let memory = args[2].as_u64().and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| RpcError::new(-32602, "invalid memory estimate"))?;
+    let policy = args[3].as_str().ok_or_else(|| RpcError::new(-32602, "invalid policy hash"))?;
+    let record = manager.submit(backend, artifact, memory, policy).await
+        .map_err(|err| RpcError::new(-32040, err))?;
+    Ok(json!({"job":record,"note":"Worker completion is not proof verification"}))
+}
+async fn proof_job_status(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
+    let manager = gateway.jobs.as_ref()
+        .ok_or_else(|| RpcError::new(-32601, "proof job dispatcher not configured"))?;
+    let args = params.as_array().ok_or_else(|| RpcError::new(-32602, "expected [job_id]"))?;
+    if args.len() != 1 {
+        return Err(RpcError::new(-32602, "expected [job_id]"));
+    }
+    let id = args[0].as_str().ok_or_else(|| RpcError::new(-32602, "invalid job id"))?;
+    let record = manager.status(id).await.map_err(|err| RpcError::new(-32041, err))?;
+    Ok(json!({"job":record}))
 }
 
 #[cfg(test)]
