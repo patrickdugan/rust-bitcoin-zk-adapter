@@ -35,6 +35,11 @@ Example JSON-RPC message, authenticated with Authorization: Bearer <token>:
 - zk.capabilities: indicates installed features, pending worker integrations,
   and fixed gateway limits.
 - zk.nodeprofile: reads Bitcoin Core chain, index and mempool status.
+- zk.getspendcontext: extends a confirmed transaction bundle with each input's
+  exact satoshi amount and previous locking script. Caps at 256 inputs and
+  fetches at most four unique parent transactions concurrently. Historical
+  parent retrieval generally requires a synced txindex. It is a read-only
+  Shinigami/Ark witness data adapter; script execution proofs are external.
 - zk.gettxcontext: fetches a raw transaction, 80-byte header and Bitcoin Core
   gettxoutproof; validates txid, header hash, partial Merkle tree and active
   chain placement at lookup time. Returns the proof and raw hex for external

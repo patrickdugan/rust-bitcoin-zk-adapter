@@ -284,6 +284,7 @@ async fn execute(core: &CoreRpc, method: &str, params: Value) -> Result<Value, R
             "mode":"read_only",
             "bitcoin_core_proxy":true,
             "transaction_context":true,
+            "bounded_spend_context":true,
             "bitcoin_merkle_proof_checked":true,
             "raito": {"proof_verifier_connected":false, "job_queue_connected":false},
             "shinigami": {"script_prover_connected":false},
@@ -300,6 +301,7 @@ async fn execute(core: &CoreRpc, method: &str, params: Value) -> Result<Value, R
             Ok(json!({"chain":chain,"indexes":indexes,"mempool":mempool}))
         }
         "zk.gettxcontext" => tx_context(core, &params).await,
+        "zk.getspendcontext" => spend_context(core, &params).await,
         name if allowed_core_rpc(name) => core.call(name, params).await,
         _ => Err(RpcError::new(-32601, "unknown zk method")),
     }
@@ -424,6 +426,126 @@ pub async fn tx_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcErro
         "raito_stark_proof":null,
         "shinigami_execution_proof":null,
         "canonicality_note":"Bitcoin Core view at lookup time; finality and fresh tip checks belong to consumer"
+    }))
+}
+
+
+pub const MAX_SPEND_INPUTS: usize = 256;
+pub const MAX_PARALLEL_PREVOUT_READS: usize = 4;
+
+/// Decode an independently fetched previous transaction and extract only the
+/// requested output positions, discarding other transaction data immediately.
+fn verified_parent_outputs(
+    raw_hex: &str,
+    expected_txid: Txid,
+    vouts: &[u32],
+) -> Result<Vec<((Txid, u32), Value)>, RpcError> {
+    let bytes = hex::decode(raw_hex)
+        .map_err(|_| RpcError::new(-32013, "previous transaction is not valid hexadecimal"))?;
+    let parent: Transaction = deserialize(&bytes)
+        .map_err(|_| RpcError::new(-32013, "previous transaction cannot be decoded"))?;
+    if parent.compute_txid() != expected_txid {
+        return Err(RpcError::new(-32013, "previous transaction hash mismatch"));
+    }
+    vouts
+        .iter()
+        .map(|vout| {
+            let output = parent.output.get(*vout as usize)
+                .ok_or_else(|| RpcError::new(-32013, "previous output index out of range"))?;
+            Ok((
+                (expected_txid, *vout),
+                json!({
+                    "value_sats":output.value.to_sat(),
+                    "script_pubkey_hex":hex::encode(output.script_pubkey.as_bytes())
+                }),
+            ))
+        })
+        .collect()
+}
+
+/// Bundles proof-checked Bitcoin transaction context with prevout scripts and
+/// exact satoshi amounts. Prevout lookup requires Bitcoin Core txindex access
+/// unless those parents are retained in Core's mempool. This makes NO claim
+/// about Shinigami/Cairo script execution or a separate UTXO validity proof.
+pub async fn spend_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcError> {
+    let included = tx_context(core, params).await?;
+    let raw_hex = included.get("raw_transaction_hex").and_then(Value::as_str)
+        .ok_or_else(|| RpcError::new(-32013, "transaction context lacks raw hex"))?;
+    let tx: Transaction = deserialize(
+        &hex::decode(raw_hex).map_err(|_| RpcError::new(-32013, "invalid raw transaction hex"))?
+    ).map_err(|_| RpcError::new(-32013, "cannot decode spend transaction"))?;
+    if tx.input.is_empty() || tx.input.len() > MAX_SPEND_INPUTS {
+        return Err(RpcError::new(-32602, "transaction input count outside bounded spend context limit"));
+    }
+
+    let mut needed = std::collections::BTreeMap::<Txid, Vec<u32>>::new();
+    for input in &tx.input {
+        let prev = input.previous_output;
+        if prev.is_null() {
+            return Err(RpcError::new(-32602, "coinbase has no standard prevout spend context"));
+        }
+        let vouts = needed.entry(prev.txid).or_default();
+        if !vouts.contains(&prev.vout) {
+            vouts.push(prev.vout);
+        }
+    }
+
+    // Fetch unique parent transactions with bounded parallelism, and retain
+    // only outputs that are actually spent. This keeps the working set small.
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut previous = std::collections::BTreeMap::<(Txid, u32), Value>::new();
+    for (parent_txid, vouts) in needed {
+        let client = core.clone();
+        tasks.spawn(async move {
+            let response = client
+                .call("getrawtransaction", json!([parent_txid.to_string(), false]))
+                .await?;
+            let raw = response.as_str()
+                .ok_or_else(|| RpcError::new(-32012, "Bitcoin Core parent transaction missing"))?;
+            verified_parent_outputs(raw, parent_txid, &vouts)
+        });
+        if tasks.len() >= MAX_PARALLEL_PREVOUT_READS {
+            let values = tasks.join_next().await
+                .ok_or_else(|| RpcError::new(-32012, "missing prevout lookup result"))?
+                .map_err(|_| RpcError::new(-32012, "prevout lookup worker failed"))??;
+            previous.extend(values);
+        }
+    }
+    while let Some(joined) = tasks.join_next().await {
+        let values = joined
+            .map_err(|_| RpcError::new(-32012, "prevout lookup worker failed"))??;
+        previous.extend(values);
+    }
+
+    let outputs = tx.input.iter().enumerate().map(|(index, input)| {
+        let prev = input.previous_output;
+        let data = previous.get(&(prev.txid, prev.vout))
+            .ok_or_else(|| RpcError::new(-32013, "prevout was not found"))?;
+        Ok(json!({
+            "input_index":index,
+            "previous_txid":prev.txid.to_string(),
+            "previous_vout":prev.vout,
+            "value_sats":data["value_sats"],
+            "script_pubkey_hex":data["script_pubkey_hex"]
+        }))
+    }).collect::<Result<Vec<_>,RpcError>>()?;
+
+    // Recheck the pinned active-chain block after potentially lengthy
+    // prevout retrieval. The consumer still owns its finality policy.
+    let height = included["block_height"]
+        .as_u64().ok_or_else(|| RpcError::new(-32013, "missing block height"))?;
+    let active = core.call("getblockhash", json!([height])).await?;
+    if active.as_str() != included["blockhash"].as_str() {
+        return Err(RpcError::new(-32014, "active chain changed while gathering spend context"));
+    }
+
+    Ok(json!({
+        "tx_context":included,
+        "prevouts":outputs,
+        "prevout_source":"bitcoin_core_transaction_index",
+        "prevout_membership_proofs":false,
+        "shinigami_execution_proof":null,
+        "active_chain_rechecked":true
     }))
 }
 
@@ -552,6 +674,21 @@ mod tests {
         assert_eq!(answer["result"]["transaction_index"], 0);
         assert_eq!(answer["result"]["merkle_inclusion_checked"], true);
         assert_eq!(answer["result"]["network"], "regtest");
+    }
+
+
+    #[test]
+    fn exact_parent_amounts_and_scripts_are_extracted_by_vout() {
+        let genesis = genesis_block(Network::Bitcoin);
+        let parent = &genesis.txdata[0];
+        let raw = bitcoin::consensus::encode::serialize_hex(parent);
+        let outputs = verified_parent_outputs(&raw, parent.compute_txid(), &[0]).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].1["value_sats"], 5_000_000_000u64);
+        assert!(outputs[0].1["script_pubkey_hex"].as_str().unwrap().ends_with("ac"));
+        let rejected = verified_parent_outputs(&raw, Txid::from_byte_array([0; 32]), &[0]);
+        assert!(rejected.is_err());
+        assert!(verified_parent_outputs(&raw, parent.compute_txid(), &[1]).is_err());
     }
 
     #[tokio::test]

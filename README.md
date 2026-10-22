@@ -26,7 +26,8 @@ The default sidecar stays small and compiles without them.
 
 The [read-only Supernode RPC service](services/supernode-rpc/README.md)
 provides proof-ready Bitcoin Core data access in Rust. It implements
-namespaced transaction-inclusion bundles, backend capability reporting and
+namespaced transaction-inclusion and bounded prevout witness bundles,
+backend capability reporting and
 node/index discovery. Heavy proving remains isolated in external workers.
 
 ## Available functionality
