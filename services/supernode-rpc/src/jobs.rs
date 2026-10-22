@@ -549,12 +549,7 @@ impl JobManager {
         json!({
             "queue_enabled":true,
             "raito_worker_configured":self.raito_worker_configured(),
-            "separate_uid_broker_configured":{
-                #[cfg(unix)]
-                { self.broker.is_some() }
-                #[cfg(not(unix))]
-                { false }
-            },
+            "separate_uid_broker_configured":self.broker_configured(),
             "raito_verifier_configured":self.raito_verifier.is_some(),
             "raito_fetch_configured":self.raito_fetch_config.is_some(),
             "typed_raito_receipts_enabled":self.raito_verifier.is_some(),
@@ -576,17 +571,19 @@ impl JobManager {
         self.raito_verifier.is_some()
     }
 
-    pub fn raito_worker_configured(&self) -> bool {
-        self.workers.enabled(&JobKind::Raito) || {
-            #[cfg(unix)]
-            {
-                self.broker.is_some()
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
+    fn broker_configured(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.broker.is_some()
         }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    pub fn raito_worker_configured(&self) -> bool {
+        self.workers.enabled(&JobKind::Raito) || self.broker_configured()
     }
 
     pub async fn status(&self, id: &str) -> Result<JobRecord, String> {
