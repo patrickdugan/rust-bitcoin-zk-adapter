@@ -320,7 +320,10 @@ mod tests {
         .expect("partial proof must reach disk before cancellation");
         client.abort();
         let _ = client.await;
-        assert!(!output.exists(), "cancelled transfer leaked a partial proof");
+        assert!(
+            !output.exists(),
+            "cancelled transfer leaked a partial proof"
+        );
         server.abort();
         let _ = server.await;
         std::fs::remove_dir_all(root).unwrap();
@@ -362,5 +365,4 @@ mod tests {
         assert!(!output.exists(), "digest failure leaked a partial proof");
         std::fs::remove_dir_all(root).unwrap();
     }
-
 }
