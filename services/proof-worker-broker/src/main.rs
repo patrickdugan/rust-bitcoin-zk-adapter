@@ -3,6 +3,8 @@
 //! or verified receipt storage. It returns untrusted bytes, never proof claims.
 
 use bitcoin::hashes::{sha256, Hash, HashEngine};
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     env,
     fs::{self, OpenOptions},
@@ -13,8 +15,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-#[cfg(test)]
-use std::time::{SystemTime, UNIX_EPOCH};
 use supernode_worker_broker_protocol::{
     hex_hash, read_header, write_header, RunReply, RunRequest, MAX_OUTPUT_BYTES,
     TRANSFER_CHUNK_BYTES, VERSION,
@@ -367,7 +367,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        env::temp_dir().join(format!("supernode-broker-{label}-{}-{stamp}", std::process::id()))
+        env::temp_dir().join(format!(
+            "supernode-broker-{label}-{}-{stamp}",
+            std::process::id()
+        ))
     }
 
     #[test]
