@@ -736,7 +736,6 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-
     #[test]
     fn total_retained_result_quota_evicts_oldest_records() {
         let directory = tmp("result-quota");
@@ -879,14 +878,23 @@ mod tests {
         );
         assert_eq!(first["next_offset"], 8);
         assert_eq!(first["complete"], false);
-        let final_chunk = jobs.result_chunk(&queued.id, 8, MAX_RESULT_CHUNK_BYTES).await.unwrap();
+        let final_chunk = jobs
+            .result_chunk(&queued.id, 8, MAX_RESULT_CHUNK_BYTES)
+            .await
+            .unwrap();
         assert_eq!(
             hex::decode(final_chunk["data_hex"].as_str().unwrap()).unwrap(),
             content[8..]
         );
         assert_eq!(final_chunk["complete"], true);
-        assert!(jobs.result_chunk(&queued.id, 0, MAX_RESULT_CHUNK_BYTES + 1).await.is_err());
-        assert!(jobs.result_chunk(&queued.id, content.len() as u64 + 1, 16).await.is_err());
+        assert!(jobs
+            .result_chunk(&queued.id, 0, MAX_RESULT_CHUNK_BYTES + 1)
+            .await
+            .is_err());
+        assert!(jobs
+            .result_chunk(&queued.id, content.len() as u64 + 1, 16)
+            .await
+            .is_err());
 
         let result_path = jobs.root.join(format!("{}.output", queued.id));
         fs::write(&result_path, b"tampered-result").unwrap();
