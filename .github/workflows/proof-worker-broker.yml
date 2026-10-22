@@ -26,3 +26,5 @@ jobs:
       - run: cargo fmt --manifest-path services/proof-worker-broker/Cargo.toml -- --check
       - run: cargo test --manifest-path services/proof-worker-broker/Cargo.toml --all-targets
       - run: cargo clippy --manifest-path services/proof-worker-broker/Cargo.toml --all-targets -- -D warnings
+      - run: cargo build --manifest-path services/proof-worker-broker/Cargo.toml
+      - run: bash services/proof-worker-broker/test-separated-uids.sh
