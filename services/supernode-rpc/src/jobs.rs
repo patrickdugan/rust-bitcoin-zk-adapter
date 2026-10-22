@@ -925,6 +925,23 @@ impl JobManager {
         ) {
             return Err("job does not have a retained completed result".into());
         }
+        // The job-status flag is insufficient to attest a proof. Revalidate
+        // every receipt binding before setting proof_verified on a chunk,
+        // including when a persisted job record is loaded after restart.
+        let verified_statement = if record.status == JobStatus::VerifiedRaito {
+            let receipt = record
+                .verified_raito
+                .as_ref()
+                .ok_or("verified Raito job has no typed receipt")?;
+            let digest = record
+                .result_sha256
+                .as_deref()
+                .ok_or("verified Raito job has no proof digest")?;
+            receipt.validate(&record, digest)?;
+            Some(receipt.clone())
+        } else {
+            None
+        };
         self.check_chain(&record).await?;
         let path = self.root.join(format!("{id}.output"));
         let metadata = fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
@@ -971,8 +988,8 @@ impl JobManager {
             "data_hex":hex::encode(chunk),
             "next_offset":offset + count as u64,
             "complete":offset + count as u64 == length,
-            "proof_verified":record.status == JobStatus::VerifiedRaito && record.verified_raito.is_some(),
-            "verified_statement":record.verified_raito
+            "proof_verified":verified_statement.is_some(),
+            "verified_statement":verified_statement
         }))
     }
 
@@ -1669,6 +1686,7 @@ mod tests {
         )
         .unwrap();
         assert!(tampered_load.verified_receipt(&started.id).await.is_err());
+        assert!(tampered_load.result_chunk(&started.id, 0, 20).await.is_err());
         atomic_json(&manager.root, &finished).unwrap();
         active.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(manager.verified_receipt(&started.id).await.is_err());
