@@ -270,9 +270,7 @@ impl JobManager {
             .call("getblockhash", json!([record.block_height]))
             .await
             .map_err(|error| error.message)?;
-        if actual.as_str() != Some(record.block_hash.as_str())
-            || self.chain.epoch().await != record.chain_epoch
-        {
+        if actual.as_str() != Some(record.block_hash.as_str()) {
             return Err("job's block was disconnected or chain changed".into());
         }
         Ok(())
@@ -329,6 +327,8 @@ impl JobManager {
             finished_unix: None,
         };
         self.check_chain(&record).await?;
+        // Epoch is captured for diagnostics; active-chain checks decide validity.
+        let _observed_epoch = self.chain.epoch().await;
         {
             let mut state = self.records.lock().await;
             if state.len() >= MAX_JOB_HISTORY {

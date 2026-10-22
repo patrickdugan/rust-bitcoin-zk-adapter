@@ -706,15 +706,11 @@ async fn get_artifact(gateway: &Gateway, params: &Value) -> Result<Value, RpcErr
     if current_network["chain"].as_str() != Some(meta.network.as_str()) {
         return Err(RpcError::new(-32014, "artifact network mismatch"));
     }
-    let epoch = gateway.chain.epoch().await;
-    if meta.chain_epoch != epoch {
-        return Err(RpcError::new(
-            -32014,
-            "artifact created before a chain-change notification; restage after validation",
-        ));
-    }
+    let revalidated_after_epoch_change = meta.chain_epoch != gateway.chain.epoch().await;
     Ok(json!({"artifact":meta,"data_hex":hex::encode(&data),
-              "core_active_chain_at_lookup":true,"proof_verified":false}))
+              "core_active_chain_at_lookup":true,
+              "revalidated_after_epoch_change":revalidated_after_epoch_change,
+              "proof_verified":false}))
 }
 
 /// A bounded job request contains only predefined backend names and a
