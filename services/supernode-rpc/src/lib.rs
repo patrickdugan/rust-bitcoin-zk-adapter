@@ -917,7 +917,6 @@ mod tests {
         assert!(verified_parent_outputs(&raw, parent.compute_txid(), &[1]).is_err());
     }
 
-
     #[tokio::test]
     async fn gateway_artifacts_recheck_core_after_new_chain_epoch() {
         let (upstream, _, blockhash) = mock_core().await;
@@ -944,7 +943,8 @@ mod tests {
             &endpoint,
             "zk.artifact.put",
             json!([900044, blockhash, "raito_input", "aabbccdd"]),
-        ).await;
+        )
+        .await;
         assert_eq!(put["error"], Value::Null);
         let id = put["result"]["artifact"]["id"].as_str().unwrap().to_owned();
         let get = query(&endpoint, "zk.artifact.get", json!([id])).await;
@@ -953,11 +953,13 @@ mod tests {
         assert_eq!(get["result"]["core_active_chain_at_lookup"], true);
         assert_eq!(get["result"]["revalidated_after_epoch_change"], false);
 
-        tracker.record(crate::chain::SequenceEvent {
-            hash: "ff".repeat(32),
-            sequence: 1,
-            kind: crate::chain::SequenceKind::BlockConnected,
-        }).await;
+        tracker
+            .record(crate::chain::SequenceEvent {
+                hash: "ff".repeat(32),
+                sequence: 1,
+                kind: crate::chain::SequenceKind::BlockConnected,
+            })
+            .await;
         // An observed tip advance must not invalidate immutable data for a
         // historical block that Bitcoin Core confirms remains active.
         let second = query(&endpoint, "zk.artifact.get", json!([id])).await;
@@ -968,7 +970,8 @@ mod tests {
             &endpoint,
             "zk.artifact.put",
             json!([900044, "00".repeat(32), "raito_input", "aabb"]),
-        ).await;
+        )
+        .await;
         assert_eq!(rejected["error"]["code"], -32014);
         std::fs::remove_dir_all(directory).unwrap();
     }
