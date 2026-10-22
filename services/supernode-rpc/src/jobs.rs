@@ -848,6 +848,59 @@ mod tests {
     }
 
     #[test]
+    fn indexed_proof_chunks_cross_boundaries_and_reject_corruption() {
+        let directory = tmp("chunk-index");
+        fs::create_dir_all(&directory).unwrap();
+        let id = "ab".repeat(32);
+        let size = MAX_RESULT_CHUNK_BYTES * 2 + 5;
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let result_path = directory.join(format!("{id}.output"));
+        fs::write(&result_path, &data).unwrap();
+        let (digest, length, index) = checked_result_digest(&result_path).unwrap();
+        assert_eq!(digest, hash_bytes(&data));
+        assert_eq!(length, size as u64);
+        assert_eq!(index.len(), 96);
+        let index_sha = hash_bytes(&index);
+        write_chunk_index(&directory, &id, &index).unwrap();
+
+        let crossing = indexed_chunk(
+            &directory,
+            &id,
+            &index_sha,
+            length,
+            MAX_RESULT_CHUNK_BYTES as u64 - 4,
+            20,
+        ).unwrap();
+        assert_eq!(crossing, data[MAX_RESULT_CHUNK_BYTES - 4..MAX_RESULT_CHUNK_BYTES + 16]);
+        let tail = indexed_chunk(
+            &directory,
+            &id,
+            &index_sha,
+            length,
+            (MAX_RESULT_CHUNK_BYTES * 2) as u64,
+            5,
+        ).unwrap();
+        assert_eq!(tail, data[MAX_RESULT_CHUNK_BYTES * 2..]);
+
+        let mut tampered = data;
+        tampered[MAX_RESULT_CHUNK_BYTES - 1] ^= 0x55;
+        fs::write(&result_path, &tampered).unwrap();
+        assert!(indexed_chunk(&directory, &id, &index_sha, length, 0, 128).is_ok());
+        assert!(indexed_chunk(
+            &directory,
+            &id,
+            &index_sha,
+            length,
+            MAX_RESULT_CHUNK_BYTES as u64 - 4,
+            20,
+        ).is_err());
+
+        fs::write(directory.join(format!("{id}.chunks")), b"corrupt").unwrap();
+        assert!(indexed_chunk(&directory, &id, &index_sha, length, 0, 16).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn total_retained_result_quota_evicts_oldest_records() {
         let directory = tmp("result-quota");
         fs::create_dir_all(&directory).unwrap();
