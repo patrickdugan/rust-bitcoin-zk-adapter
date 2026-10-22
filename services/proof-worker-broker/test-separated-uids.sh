@@ -50,7 +50,7 @@ sudo chmod 0700 "$tmp/staging/mock-worker.sh"
 sudo touch "$tmp/staging/raito-config.json"
 sudo chown "$broker_uid:$(id -g)" "$tmp/staging/raito-config.json"
 sudo chmod 0600 "$tmp/staging/raito-config.json"
-digest="$(sha256sum "$tmp/staging/mock-worker.sh" | awk '{print $1}')"
+digest="$(sudo sha256sum "$tmp/staging/mock-worker.sh" | awk '{print $1}')"
 binary="services/proof-worker-broker/target/debug/supernode-proof-worker-broker"
 sudo -u "$worker_user" env \
   SUPERNODE_BROKER_SOCKET="$tmp/socket/broker.sock" \
