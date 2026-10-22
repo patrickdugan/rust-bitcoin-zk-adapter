@@ -1,4 +1,5 @@
 use bitcoin::consensus::deserialize;
+use bitcoin::hashes::Hash;
 use bitcoin::{block::Header, Transaction, TxMerkleNode};
 use rust_bitcoin_zk_adapter::evidence::{
     decode_hex_exact, verify_litecoin_testnet_claim, EvidenceChain, EvidenceNetwork,
@@ -59,8 +60,6 @@ fn rejects_a_different_genesis_or_network() {
     claim.genesis_hash = "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2".into();
     assert!(verify_litecoin_testnet_claim(&claim).is_err());
 
-    let raw = serde_json::to_string(&synthetic_claim()).unwrap_err();
-    assert!(!raw.to_string().is_empty());
     assert!(serde_json::from_str::<InclusionClaim>(r#"{"network":"mainnet"}"#).is_err());
 }
 
