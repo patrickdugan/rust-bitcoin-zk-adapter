@@ -28,9 +28,14 @@ Service settings must match the Rust configuration:
 The gateway must also configure the broker and verifier UIDs (available via
 `id -u`) and a read token distinct from the control token. The verifier
 environment must configure the separate producer/gateway UIDs and the
-operator-pinned Raito executable SHA-256. The broker owns the pinned fetcher
-configuration and its Bitcoin Core cookie. The gateway's Bitcoin Core RPC
-credentials must remain private to the gateway.
+operator-pinned Raito executable SHA-256. The broker owns the pinned fetcher configuration and its Bitcoin Core
+credential file. Because the producer unit sets `ProtectHome=yes`, place
+that credential outside `/home`, in a protected service-readable directory
+such as `/etc/supernode/producer-bitcoin-rpc-credential`. The fetcher's
+`bitcoin_rpc_cookie_file` field accepts the usual `user:password` format.
+For a dedicated RPC identity, configure Bitcoin Core's `rpcauth` policy
+accordingly. The gateway's Bitcoin Core RPC credentials must remain private
+to the gateway.
 
 **Hard disk quota:** `StateDirectory` supplies ownership and restart-persistent
 staging but does **not** give it a hard byte ceiling. Configure an ext4/XFS
