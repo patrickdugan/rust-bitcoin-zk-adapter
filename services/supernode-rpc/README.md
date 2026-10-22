@@ -12,7 +12,7 @@ counters; `zk.chain.refresh` reconciles against Bitcoin Core. Disconnections,
 malformed messages, and counter gaps mark the local state dirty. TCP subscription
 is restricted to loopback. PUB/SUB messages are not durable or authenticated.
 
-# Bitcoin Supernode RPC v0.1
+# Bitcoin Supernode RPC v0.2
 
 This is a separate Rust service providing a deliberately restricted
 JSON-RPC 2.0-compatible superset of Bitcoin Core read methods. It is designed
@@ -44,8 +44,73 @@ Example JSON-RPC message, authenticated with Authorization: Bearer <token>:
     {"jsonrpc":"2.0","id":2,"method":"zk.gettxcontext",
      "params":["<txid>","<confirmed_block_hash>"]}
 
+## ZMQ chain tracking
+
+Configure Bitcoin Core with `zmqpubsequence=tcp://127.0.0.1:28333`
+and set `BITCOIN_ZMQ_SEQUENCE_URL=tcp://127.0.0.1:28333` in the gateway.
+The subscriber parses Bitcoin Core's multipart `sequence` messages, detects
+transport gaps, marks its chain snapshot dirty on block connects or disconnects,
+and reconciles state with Bitcoin Core. On reconnect it never assumes that
+all intervening events were observed.
+
+`zk.chainstate` reports connection health, message counters and the latest
+snapshot. `zk.chain.refresh` forces an RPC reconciliation.
+Missed notifications do not replace Bitcoin Core's active-chain checks.
+
+## Disk-backed content-addressed artifact cache
+
+Set `SUPERNODE_ARTIFACT_DIR` to a private writable directory.
+`SUPERNODE_ARTIFACT_BUDGET_BYTES` defaults to 67108864 (64 MiB).
+An artifact binds network, block hash, height, input kind and the data SHA-256.
+It stores bounded bytes under a content-derived filename with atomic writes.
+The cache retains at most 512 entries, evicting old entries on budget pressure.
+
+`zk.artifact.put` accepts `[height,blockhash,kind,hexdata]`. Kinds contain
+lowercase ASCII letters and underscores. It accepts the data only while its
+block belongs to Bitcoin Core's active chain. `zk.artifact.get` accepts
+`[artifact_id]`, rechecks the same Bitcoin Core height-to-hash mapping and
+network before returning bytes, and reports when a changed chain epoch has
+required revalidation. `zk.artifact.stats` reports bounded cache usage.
+
+The 64 KiB JSON-RPC request limit restricts how much data can be uploaded per
+request. Large proving inputs should be staged using a future authenticated
+streaming/import interface, avoiding base64/hex expansion in the RPC gateway.
+
+## Durable proof dispatch
+
+With `SUPERNODE_JOB_DIR` set, the gateway loads job status files and
+recovers jobs left queued or running as `interrupted`. It does not
+automatically replay non-idempotent proving work after a crash.
+
+Configure approved workers as absolute paths using either or both of
+`SUPERNODE_RAITO_PROVER` and `SUPERNODE_SHINIGAMI_PROVER`. The
+gateway launches those known binaries directly, without a shell, using the
+following worker arguments:
+
+```sh
+approved-prover --input /private/job.input --output /private/job.output \
+  --network main --blockhash HASH --height HEIGHT --policy-sha256 HASH
+```
+
+The process must create a non-empty output file and exit successfully.
+The gateway records an output digest under status `completed_unverified`.
+That status means **a worker produced bytes**. It does not attest to Raito,
+Shinigami, or Bitcoin proof soundness. Proof verification and publication
+require a separately checked verifier and policy binding.
+
+`zk.proof.submit` takes `[backend,artifact_id,estimated_memory_mib,
+policy_sha256]`. `zk.proof.status` takes `[job_id]`. Unconfigured
+backends are rejected. Queue occupancy is capped at 16 jobs. Worker count
+defaults to 1 and is capped at 4; runtime timeout is 600 seconds.
+`SUPERNODE_PROOF_MEMORY_MIB` defaults to 4096 and sets an **admission
+reservation** budget. It does not impose a hard RSS or GPU-memory cap:
+operators must use cgroups or another OS/container limiter for workers.
+
 ## Available namespaced RPC
 
+- zk.chainstate and zk.chain.refresh: Bitcoin Core ZMQ tracking status and reconciliation.
+- zk.artifact.put/get/stats: bounded, reorg-checked proof input artifact storage.
+- zk.proof.submit/status: durable, admission-controlled worker scheduling.
 - zk.capabilities: indicates installed features, pending worker integrations,
   and fixed gateway limits.
 - zk.nodeprofile: reads Bitcoin Core chain, index and mempool status.
@@ -69,9 +134,8 @@ Its custom methods extend a safe subset.
 The default RPC request cap is 64 KiB, upstream response cap 24 MiB,
 max inflight calls 4 (hard maximum 8), with a 30-second Bitcoin Core timeout.
 Calls perform bounded streaming reads of Core responses, and each request
-completes before its semaphore slot is released. There is no unbounded block
-cache or proof queue in v0.1. OS and Bitcoin Core caches remain useful; adding
-a size-bounded, reorg-aware content cache is a later milestone.
+completes before its semaphore slot is released. An optional, bounded artifact store and durable proof-job dispatcher are
+available, without enabling heavy Cairo/STWO inside this RPC process.
 
 A proving worker should run as a different process with explicit memory limits,
 bounded concurrency, persistent job records and content-addressed artifacts.
@@ -93,8 +157,6 @@ inferred from on-chain transaction inclusion alone.
 
 ## Planned methods
 
-- zk.getspendcontext: bounded, prevout-aware witness bundles for Shinigami.
-- zk.proof.submit/status: memory-budgeted proof-worker jobs.
 - zk.getproof: attested Raito proof artifacts and verified policy metadata.
-- zk.subscribe: reorg/sequence-aware event transport from Bitcoin Core ZMQ.
+- zk.subscribe: a future push-subscription API over the tracked ZMQ sequence stream.
 - zk.getarkanchor: optional Ark adapter linking VTXO exits to on-chain anchors.

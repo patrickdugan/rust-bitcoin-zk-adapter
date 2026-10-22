@@ -1,7 +1,8 @@
 # Bitcoin Supernode architecture
 
-**Status as of 2026-10-22:** A bounded read-only Rust RPC gateway and
-an independently compiled, upstream-pinned Raito verifier exist. Bitcoin
+**Status as of 2026-10-22:** A bounded Rust RPC gateway, ZMQ sequence
+monitor, disk-backed artifact store, durable proof-job dispatcher and an
+independently compiled, upstream-pinned Raito verifier exist. Bitcoin
 Core continues to validate Bitcoin consensus. Full-block STARK proving,
 Shinigami execution proofs and an Ark VTXO integration are planned services.
 
@@ -58,8 +59,8 @@ zmqpubsequence=tcp://127.0.0.1:28333
 
 The block filter index is optional and useful for certain discovery
 workloads. An unpruned chain plus transaction index improves historical
-proof preparation. The ZMQ sequence feed is a **future** gateway feature;
-the current gateway uses RPC active-chain rechecks and does not ingest ZMQ.
+proof preparation. The optional sequence subscriber is implemented; applications still rely on
+Bitcoin Core active-chain rechecks because ZMQ notifications may be lost.
 
 For a single machine, budget memory by separating predictable node
 storage/cache from volatile proof generation. The figures below are
@@ -102,13 +103,13 @@ height-to-hash lookups across reorgs.
 
 - zk.getblockcontext(blockhash): provable block-input manifest, heavy data
   streamed through disk with bounded memory.
-- zk.proof.submit/get/status: durable async work queue with resource
-  admission control and cancellation.
+- zk.proof.get and cancellation: publishing verified output artifacts and
+  cleanly stopping an active worker are still pending; submit/status exist.
 - zk.raito.verify: type-safe STARK verifier endpoint with explicit program
   hashes, work requirements and proof provenance.
 - zk.shinigami.prepare: script witness bundle; execution/proof worker remains
   separate from the gateway.
-- zk.watch: ZMQ sequence-backed block and reorg subscriptions.
+- zk.watch: a future push API for the implemented ZMQ sequence tracking.
 - Ark-specific adapters: funding, exit, forfeit and challenge evidence,
   with VTXO tree rules kept inside Ark components.
 
