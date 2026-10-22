@@ -1,8 +1,6 @@
 use bitcoin::hashes::Hash;
 use bitcoin::Txid;
-use rust_bitcoin_zk_adapter::{
-    commit_candidates, verify_native, Candidate, PublicInputs,
-};
+use rust_bitcoin_zk_adapter::{commit_candidates, verify_native, Candidate, PublicInputs};
 
 fn fixture() -> PublicInputs {
     PublicInputs {
