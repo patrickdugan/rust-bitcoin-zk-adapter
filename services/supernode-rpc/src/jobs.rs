@@ -83,8 +83,10 @@ fn hash_bytes(bytes: &[u8]) -> String {
 /// chunk using a fixed buffer. The index is at most 32 KiB for a 64 MiB file.
 fn checked_result_digest(path: &Path) -> Result<(String, u64, Vec<u8>), String> {
     let metadata = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
-    if !metadata.file_type().is_file() || metadata.len() == 0 ||
-        metadata.len() > MAX_WORKER_OUTPUT_BYTES {
+    if !metadata.file_type().is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_WORKER_OUTPUT_BYTES
+    {
         return Err("worker output absent, unsafe or over size cap".into());
     }
     let mut file = File::open(path).map_err(|err| err.to_string())?;
@@ -94,7 +96,8 @@ fn checked_result_digest(path: &Path) -> Result<(String, u64, Vec<u8>), String> 
     let mut offset = 0u64;
     while offset < metadata.len() {
         let n = (metadata.len() - offset).min(MAX_RESULT_CHUNK_BYTES as u64) as usize;
-        file.read_exact(&mut buffer[..n]).map_err(|err| err.to_string())?;
+        file.read_exact(&mut buffer[..n])
+            .map_err(|err| err.to_string())?;
         whole.input(&buffer[..n]);
         indexes.extend_from_slice(sha256::Hash::hash(&buffer[..n]).as_byte_array());
         offset += n as u64;
@@ -103,17 +106,26 @@ fn checked_result_digest(path: &Path) -> Result<(String, u64, Vec<u8>), String> 
     if file.read(&mut extra).map_err(|err| err.to_string())? != 0 {
         return Err("worker output changed while hashing".into());
     }
-    Ok((hex::encode(sha256::Hash::from_engine(whole).to_byte_array()), offset, indexes))
+    Ok((
+        hex::encode(sha256::Hash::from_engine(whole).to_byte_array()),
+        offset,
+        indexes,
+    ))
 }
 
 /// Publish the small chunk index atomically and bind it to the job record.
 fn write_chunk_index(root: &Path, id: &str, index: &[u8]) -> Result<(), String> {
     let output = root.join(format!("{id}.chunks"));
-    let ns = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|err| err.to_string())?.as_nanos();
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_nanos();
     let temporary = root.join(format!("{id}.tmp-{}-{ns}", std::process::id()));
-    let mut file = OpenOptions::new().write(true).create_new(true)
-        .open(&temporary).map_err(|err| err.to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|err| err.to_string())?;
     file.write_all(index).map_err(|err| err.to_string())?;
     file.sync_all().map_err(|err| err.to_string())?;
     fs::rename(temporary, output).map_err(|err| err.to_string())
@@ -156,7 +168,8 @@ fn indexed_chunk(
         let start = chunk_no * MAX_RESULT_CHUNK_BYTES as u64;
         let len = (length - start).min(MAX_RESULT_CHUNK_BYTES as u64) as usize;
         let mut chunk = vec![0u8; len];
-        file.seek(SeekFrom::Start(start)).map_err(|err| err.to_string())?;
+        file.seek(SeekFrom::Start(start))
+            .map_err(|err| err.to_string())?;
         file.read_exact(&mut chunk).map_err(|err| err.to_string())?;
         let hash_start = chunk_no as usize * 32;
         let digest = sha256::Hash::hash(&chunk).to_byte_array();
@@ -385,7 +398,10 @@ impl JobManager {
             let entry = entry.map_err(|err| err.to_string())?;
             let name = entry.file_name().to_string_lossy().to_string();
             let cleanup = name.strip_suffix(".chunks").is_some_and(|id| {
-                is_hash(id) && !records.get(id).is_some_and(|r| r.status == JobStatus::CompletedUnverified)
+                is_hash(id)
+                    && !records
+                        .get(id)
+                        .is_some_and(|r| r.status == JobStatus::CompletedUnverified)
             }) || name.strip_suffix(".input").is_some_and(is_hash)
                 || name.strip_suffix(".output").is_some_and(|id| {
                     is_hash(id)
@@ -603,7 +619,10 @@ impl JobManager {
             return Err("retained output absent or unsafe".into());
         }
         let length = metadata.len();
-        if record.result_bytes.is_some_and(|expected| expected != length) {
+        if record
+            .result_bytes
+            .is_some_and(|expected| expected != length)
+        {
             return Err("retained output length mismatch".into());
         }
         if offset > length {
@@ -620,7 +639,8 @@ impl JobManager {
                 return Err("legacy output failed full SHA-256 verification".into());
             }
             let mut file = File::open(&path).map_err(|err| err.to_string())?;
-            file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|err| err.to_string())?;
             let mut buf = vec![0u8; count];
             file.read_exact(&mut buf).map_err(|err| err.to_string())?;
             buf
@@ -963,7 +983,10 @@ mod tests {
         let index_path = jobs.root.join(format!("{}.chunks", queued.id));
         let original_index = fs::read(&index_path).unwrap();
         assert_eq!(original_index.len(), 32);
-        assert_eq!(completed.result_chunk_index_sha256, Some(hash_bytes(&original_index)));
+        assert_eq!(
+            completed.result_chunk_index_sha256,
+            Some(hash_bytes(&original_index))
+        );
 
         let first = jobs.result_chunk(&queued.id, 0, 8).await.unwrap();
         assert_eq!(first["proof_verified"], false);
