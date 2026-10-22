@@ -63,18 +63,25 @@ fn is_hex_key(value: &str) -> bool {
 fn is_safe_kind(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 40
-        && value.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
 }
 
 fn pair(root: &Path, id: &str) -> (PathBuf, PathBuf) {
-    (root.join(format!("{id}.blob")), root.join(format!("{id}.json")))
+    (
+        root.join(format!("{id}.blob")),
+        root.join(format!("{id}.json")),
+    )
 }
 
 /// Write bytes to a unique temporary sibling and rename to final path.
 /// Crash-incomplete .tmp files are deleted at next store startup.
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|err| err.to_string())?.as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_nanos();
     let temp = path.with_extension(format!("tmp-{}-{stamp}", std::process::id()));
     {
         let mut file = OpenOptions::new()
@@ -94,8 +101,10 @@ impl ArtifactStore {
             return Err("artifact cache budget outside permitted range".into());
         }
         fs::create_dir_all(&root).map_err(|err| err.to_string())?;
-        if fs::symlink_metadata(&root).map_err(|err| err.to_string())?
-            .file_type().is_symlink()
+        if fs::symlink_metadata(&root)
+            .map_err(|err| err.to_string())?
+            .file_type()
+            .is_symlink()
         {
             return Err("artifact cache directory cannot be a symlink".into());
         }
@@ -116,7 +125,9 @@ impl ArtifactStore {
                 let _ = fs::remove_file(path);
                 continue;
             }
-            let Some(id) = name.strip_suffix(".json") else { continue };
+            let Some(id) = name.strip_suffix(".json") else {
+                continue;
+            };
             if !is_hex_key(id) || !entry.file_type().map_err(|err| err.to_string())?.is_file() {
                 continue;
             }
@@ -124,17 +135,26 @@ impl ArtifactStore {
                 Ok(bytes) if bytes.len() < 4_096 => bytes,
                 _ => continue,
             };
-            let Ok(meta) = serde_json::from_slice::<ArtifactMeta>(&contents) else { continue };
+            let Ok(meta) = serde_json::from_slice::<ArtifactMeta>(&contents) else {
+                continue;
+            };
             let (blob, _) = pair(&root, id);
-            if meta.id != id || meta.bytes == 0 || meta.bytes > MAX_ARTIFACT_BYTES as u64
-                || !blob.is_file() || fs::metadata(blob).map_err(|err| err.to_string())?.len() != meta.bytes
+            if meta.id != id
+                || meta.bytes == 0
+                || meta.bytes > MAX_ARTIFACT_BYTES as u64
+                || !blob.is_file()
+                || fs::metadata(blob).map_err(|err| err.to_string())?.len() != meta.bytes
             {
                 continue;
             }
             index.bytes += meta.bytes;
             index.entries.insert(id.to_owned(), meta);
         }
-        let store = Self { root, max_bytes, index: Arc::new(Mutex::new(index)) };
+        let store = Self {
+            root,
+            max_bytes,
+            index: Arc::new(Mutex::new(index)),
+        };
         // Startup quotas are respected before any artifact read or write.
         // Startup prune is synchronous because the constructor has no runtime.
         store.prune_blocking()?;
@@ -143,14 +163,18 @@ impl ArtifactStore {
 
     fn prune_blocking(&self) -> Result<(), String> {
         // Constructors are single-threaded; later writers use the async mutex.
-        let mut state = self.index.try_lock()
+        let mut state = self
+            .index
+            .try_lock()
             .map_err(|_| "cannot initialize artifact cache index")?;
         self.prune_locked(&mut state)
     }
 
     fn prune_locked(&self, state: &mut Index) -> Result<(), String> {
         while state.bytes > self.max_bytes || state.entries.len() > MAX_ENTRIES {
-            let (id, _) = state.entries.iter()
+            let (id, _) = state
+                .entries
+                .iter()
                 .min_by_key(|(id, meta)| (meta.created_unix, *id))
                 .ok_or("unable to evict cache entry")?;
             let id = id.to_owned();
@@ -182,7 +206,9 @@ impl ArtifactStore {
             return Err("invalid or oversized artifact submission".into());
         }
         let digest = sha_bytes(data);
-        let basis = format!("BTC-SUPERNODE-ARTIFACT-V1:{network}:{block_hash}:{block_height}:{kind}:{digest}");
+        let basis = format!(
+            "BTC-SUPERNODE-ARTIFACT-V1:{network}:{block_hash}:{block_height}:{kind}:{digest}"
+        );
         let id = sha_bytes(basis.as_bytes());
         let mut state = self.index.lock().await;
         if let Some(existing) = state.entries.get(&id) {
@@ -240,7 +266,10 @@ mod tests {
         std::env::temp_dir().join(format!(
             "btc-supernode-artifact-{}-{}-{suffix}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
 
@@ -248,13 +277,25 @@ mod tests {
     async fn reorg_epochs_and_networks_produce_separate_metadata() {
         let dir = root("epochs");
         let store = ArtifactStore::new(dir.clone(), 4_096).unwrap();
-        let first = store.put("regtest", &"ab".repeat(32), 120, 4, "raito_input", b"hello").await.unwrap();
-        let same = store.put("regtest", &"ab".repeat(32), 120, 4, "raito_input", b"hello").await.unwrap();
+        let first = store
+            .put("regtest", &"ab".repeat(32), 120, 4, "raito_input", b"hello")
+            .await
+            .unwrap();
+        let same = store
+            .put("regtest", &"ab".repeat(32), 120, 4, "raito_input", b"hello")
+            .await
+            .unwrap();
         assert_eq!(first.id, same.id);
-        let changed_epoch = store.put("regtest", &"ab".repeat(32), 120, 5, "raito_input", b"hello").await.unwrap();
+        let changed_epoch = store
+            .put("regtest", &"ab".repeat(32), 120, 5, "raito_input", b"hello")
+            .await
+            .unwrap();
         assert_eq!(changed_epoch.id, first.id);
         assert_eq!(changed_epoch.chain_epoch, 5);
-        let main = store.put("main", &"ab".repeat(32), 120, 5, "raito_input", b"hello").await.unwrap();
+        let main = store
+            .put("main", &"ab".repeat(32), 120, 5, "raito_input", b"hello")
+            .await
+            .unwrap();
         assert_ne!(main.id, first.id);
         let (_, bytes) = store.get(&first.id).await.unwrap();
         assert_eq!(bytes, b"hello");
@@ -265,8 +306,14 @@ mod tests {
     async fn bounded_store_evicts_and_detects_corruption() {
         let dir = root("quota");
         let store = ArtifactStore::new(dir.clone(), 8).unwrap();
-        store.put("regtest", &"ab".repeat(32), 10, 1, "input", b"aaaaaa").await.unwrap();
-        let second = store.put("regtest", &"ab".repeat(32), 10, 1, "input", b"bbbbbb").await.unwrap();
+        store
+            .put("regtest", &"ab".repeat(32), 10, 1, "input", b"aaaaaa")
+            .await
+            .unwrap();
+        let second = store
+            .put("regtest", &"ab".repeat(32), 10, 1, "input", b"bbbbbb")
+            .await
+            .unwrap();
         assert_eq!(store.stats().await["entries"], 1);
         let (path, _) = pair(&dir, &second.id);
         fs::write(path, b"bad").unwrap();

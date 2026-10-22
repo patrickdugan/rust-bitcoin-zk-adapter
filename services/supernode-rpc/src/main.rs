@@ -1,10 +1,10 @@
 //! Locally bound authenticated Bitcoin Core RPC superset.
+use rust_bitcoin_supernode_rpc::cache::{ArtifactStore, MAX_STORE_BYTES};
 use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
 };
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use std::sync::Arc;
-use rust_bitcoin_supernode_rpc::cache::{ArtifactStore, MAX_STORE_BYTES};
 use std::{env, error::Error, net::SocketAddr};
 
 fn credential_pair() -> Result<(String, String), Box<dyn Error>> {

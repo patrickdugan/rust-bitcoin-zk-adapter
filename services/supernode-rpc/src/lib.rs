@@ -17,8 +17,8 @@ use reqwest::{redirect, Client, Url};
 use serde_json::{json, Value};
 use std::{str::FromStr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
-pub mod chain;
 pub mod cache;
+pub mod chain;
 
 pub const MAX_RPC_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RPC_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
@@ -314,7 +314,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
         "zk.chainstate" => Ok(gateway.chain.snapshot().await),
         "zk.artifact.stats" => Ok(match &gateway.artifacts {
             Some(store) => store.stats().await,
-            None => json!({"enabled":false})
+            None => json!({"enabled":false}),
         }),
         "zk.artifact.put" => put_artifact(gateway, &params).await,
         "zk.artifact.get" => get_artifact(gateway, &params).await,
@@ -604,35 +604,58 @@ pub async fn spend_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcE
     }))
 }
 
-
 /// Store bounded content-addressed, application-neutral input bytes.
 /// A new artifact is only accepted for a block in Bitcoin Core's active
 /// chain, and the network identity is derived from Bitcoin Core.
 async fn put_artifact(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
-    let store = gateway.artifacts.as_ref()
+    let store = gateway
+        .artifacts
+        .as_ref()
         .ok_or_else(|| RpcError::new(-32601, "artifact storage is not configured"))?;
-    let a = params.as_array().ok_or_else(|| RpcError::new(-32602, "expected [height,blockhash,kind,hexdata]"))?;
+    let a = params
+        .as_array()
+        .ok_or_else(|| RpcError::new(-32602, "expected [height,blockhash,kind,hexdata]"))?;
     if a.len() != 4 {
-        return Err(RpcError::new(-32602, "expected [height,blockhash,kind,hexdata]"));
+        return Err(RpcError::new(
+            -32602,
+            "expected [height,blockhash,kind,hexdata]",
+        ));
     }
-    let height = a[0].as_u64().ok_or_else(|| RpcError::new(-32602, "invalid height"))?;
+    let height = a[0]
+        .as_u64()
+        .ok_or_else(|| RpcError::new(-32602, "invalid height"))?;
     let hash = BlockHash::from_str(a[1].as_str().unwrap_or(""))
-        .map_err(|_| RpcError::new(-32602, "invalid blockhash"))?.to_string();
-    let kind = a[2].as_str().ok_or_else(|| RpcError::new(-32602, "invalid kind"))?;
-    let data = hex::decode(a[3].as_str().ok_or_else(|| RpcError::new(-32602, "hex data required"))?)
-        .map_err(|_| RpcError::new(-32602, "invalid input hexadecimal"))?;
+        .map_err(|_| RpcError::new(-32602, "invalid blockhash"))?
+        .to_string();
+    let kind = a[2]
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32602, "invalid kind"))?;
+    let data = hex::decode(
+        a[3].as_str()
+            .ok_or_else(|| RpcError::new(-32602, "hex data required"))?,
+    )
+    .map_err(|_| RpcError::new(-32602, "invalid input hexadecimal"))?;
     let epoch_before = gateway.chain.epoch().await;
     let active = gateway.core.call("getblockhash", json!([height])).await?;
     if active.as_str() != Some(&hash) {
-        return Err(RpcError::new(-32014, "artifact block is not on active chain"));
+        return Err(RpcError::new(
+            -32014,
+            "artifact block is not on active chain",
+        ));
     }
     let info = gateway.core.call("getblockchaininfo", json!([])).await?;
-    let network = info["chain"].as_str()
+    let network = info["chain"]
+        .as_str()
         .ok_or_else(|| RpcError::new(-32012, "network missing from Bitcoin Core"))?;
     if epoch_before != gateway.chain.epoch().await {
-        return Err(RpcError::new(-32014, "chain changed during artifact staging"));
+        return Err(RpcError::new(
+            -32014,
+            "chain changed during artifact staging",
+        ));
     }
-    let metadata = store.put(network, &hash, height, epoch_before, kind, &data).await
+    let metadata = store
+        .put(network, &hash, height, epoch_before, kind, &data)
+        .await
         .map_err(|err| RpcError::new(-32030, err))?;
     Ok(json!({"artifact":metadata,"proof_verified":false}))
 }
@@ -641,17 +664,32 @@ async fn put_artifact(gateway: &Gateway, params: &Value) -> Result<Value, RpcErr
 /// Chain event epochs are diagnostic; Core's getblockhash check remains
 /// mandatory even if ZMQ is disabled or a sequence notification is lost.
 async fn get_artifact(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
-    let store = gateway.artifacts.as_ref()
+    let store = gateway
+        .artifacts
+        .as_ref()
         .ok_or_else(|| RpcError::new(-32601, "artifact storage is not configured"))?;
-    let args = params.as_array().ok_or_else(|| RpcError::new(-32602, "expected [artifact_id]"))?;
+    let args = params
+        .as_array()
+        .ok_or_else(|| RpcError::new(-32602, "expected [artifact_id]"))?;
     if args.len() != 1 {
         return Err(RpcError::new(-32602, "expected [artifact_id]"));
     }
-    let id = args[0].as_str().ok_or_else(|| RpcError::new(-32602, "invalid artifact id"))?;
-    let (meta, data) = store.get(id).await.map_err(|err| RpcError::new(-32031, err))?;
-    let active = gateway.core.call("getblockhash", json!([meta.block_height])).await?;
+    let id = args[0]
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32602, "invalid artifact id"))?;
+    let (meta, data) = store
+        .get(id)
+        .await
+        .map_err(|err| RpcError::new(-32031, err))?;
+    let active = gateway
+        .core
+        .call("getblockhash", json!([meta.block_height]))
+        .await?;
     if active.as_str() != Some(meta.block_hash.as_str()) {
-        return Err(RpcError::new(-32014, "artifact block no longer belongs to active chain"));
+        return Err(RpcError::new(
+            -32014,
+            "artifact block no longer belongs to active chain",
+        ));
     }
     let current_network = gateway.core.call("getblockchaininfo", json!([])).await?;
     if current_network["chain"].as_str() != Some(meta.network.as_str()) {
@@ -659,7 +697,10 @@ async fn get_artifact(gateway: &Gateway, params: &Value) -> Result<Value, RpcErr
     }
     let epoch = gateway.chain.epoch().await;
     if meta.chain_epoch != epoch {
-        return Err(RpcError::new(-32014, "artifact created before a chain-change notification; restage after validation"));
+        return Err(RpcError::new(
+            -32014,
+            "artifact created before a chain-change notification; restage after validation",
+        ));
     }
     Ok(json!({"artifact":meta,"data_hex":hex::encode(&data),
               "core_active_chain_at_lookup":true,"proof_verified":false}))
