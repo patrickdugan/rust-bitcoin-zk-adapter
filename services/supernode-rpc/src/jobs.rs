@@ -442,6 +442,7 @@ impl JobManager {
                 // was never durably accepted as a verified statement.
                 record.status = JobStatus::CompletedUnverified;
                 record.error = Some("gateway restarted during Raito verification".into());
+                record.finished_unix = Some(unix_time());
                 atomic_json(&root, &record)?;
             }
             if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
@@ -698,7 +699,10 @@ impl JobManager {
             record.result_chunk_index_sha256 = index_sha256;
             record.verified_raito = None;
             record.error = error;
-            if !matches!(status, JobStatus::Queued | JobStatus::Running) {
+            if !matches!(
+                status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::VerifyingRaito
+            ) {
                 record.finished_unix = Some(unix_time());
             }
             if let Err(err) = atomic_json(&self.root, record) {
@@ -736,6 +740,7 @@ impl JobManager {
         report.validate(record, digest)?;
         let mut updated = record.clone();
         updated.status = JobStatus::VerifiedRaito;
+        updated.finished_unix = Some(unix_time());
         updated.error = None;
         updated.verified_raito = Some(report);
         atomic_json(&self.root, &updated)?;
@@ -978,6 +983,7 @@ impl JobManager {
                                 .filter(|r| r.status == JobStatus::VerifyingRaito)
                             {
                                 current.status = JobStatus::CompletedUnverified;
+                                current.finished_unix = Some(unix_time());
                                 current.error = Some(format!("Raito verification: {err}"));
                                 if let Err(e) = atomic_json(&self.root, current) {
                                     eprintln!("Could not persist verification error: {e}");
