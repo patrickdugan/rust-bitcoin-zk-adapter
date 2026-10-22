@@ -1,0 +1,23 @@
+name: Benchmark harness checks
+on:
+  push:
+    paths:
+      - 'tools/benchmark_supernode.py'
+      - 'tools/test_benchmark_supernode.py'
+      - '.github/workflows/benchmark-harness.yml'
+  pull_request:
+    paths:
+      - 'tools/benchmark_supernode.py'
+      - 'tools/test_benchmark_supernode.py'
+      - '.github/workflows/benchmark-harness.yml'
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m py_compile tools/benchmark_supernode.py
+      - run: python -m unittest tools.test_benchmark_supernode -v

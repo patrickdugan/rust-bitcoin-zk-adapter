@@ -4,6 +4,11 @@ on:
   push:
     paths:
       - 'integrations/raito/**'
+      - '.github/workflows/raito-integration.yml'
+  pull_request:
+    paths:
+      - 'integrations/raito/**'
+      - '.github/workflows/raito-integration.yml'
 jobs:
   check:
     runs-on: ubuntu-latest

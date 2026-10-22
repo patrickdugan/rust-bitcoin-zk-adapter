@@ -195,3 +195,148 @@ small RPC response. Clients should still recompute the original whole-output
 SHA-256 after assembling all chunks. The chunk index authenticates bytes
 against the locally recorded worker output, **not** the proof statement.
 
+
+
+## Raito verified result publication
+
+The optional `SUPERNODE_RAITO_VERIFIER` names an absolute, separately built
+`integrations/raito` verifier binary. The operator must also set
+`SUPERNODE_RAITO_VERIFIER_SHA256` to the lowercase SHA-256 of **that exact
+executable**. The gateway checks the pin before every invocation. Worker
+output can become a typed `verified_raito` job only after that executable
+checks the Raito compressed SPV proof with `dev=false`, its default policy
+matches the supplied `policy_sha256`, the proven transaction matches the
+caller-provided TXID, and the block matches Bitcoin Core at verification time.
+
+`zk.proof.submit` accepts a fifth optional argument, `expected_txid`, for
+Raito jobs. Without it, or without an operator-configured verifier, completed
+output stays `completed_unverified`. The policy hash is the SHA-256 of the
+canonical JSON serialization of `VerifierConfig::default()` from the pinned
+Raito integration. Arbitrary hashes supplied by an RPC client cannot authorize
+verification. `zk.proof.receipt [job_id]` serves the typed result only after
+a fresh active-chain check. `zk.proof.get` includes the checked Raito statement
+on verified chunks. Verification failures preserve the unverified output for
+inspection within retention limits. Quota eviction retains the verified
+statement and original proof digest, with `output_retained:false`.
+
+Proof verification is still a separate process and uses the same admission
+reservation mechanism as proving. Operators must impose OS/cgroup memory
+limits on both binaries. Raito's recursive proof validates its configured
+statement; it cannot independently select Bitcoin's economic canonical chain.
+
+## Real Raito proof fetch worker
+
+For a fully fetched, compressed Raito SPV proof, build the separately compiled
+`integrations/raito-fetcher` binary and configure its operator-owned JSON file
+through `SUPERNODE_RAITO_FETCH_CONFIG=/absolute/path/fetcher-config.json`.
+Set `SUPERNODE_RAITO_PROVER` to the absolute fetcher executable. The gateway
+passes the configuration path only to Raito jobs, and supplies the expected TXID
+as `--expected-txid` alongside the existing worker arguments.
+
+The fetcher runs an independently pinned upstream `raito-spv-client fetch`
+binary, using a local Bitcoin Core credential cookie and an operator-selected
+Raito bridge URL. This process fetches the compressed proof bytes into the
+bounded dispatcher output. The separately pinned `raito-verify` process
+remains solely responsible for publishing a verified STARK statement.
+The default Raito integration is optional and off unless configured.
+
+Both fetch and verification need OS-level limits covering descendants, plus
+per-job disk quotas. The current memory reservation and post-execution
+result cap are admission/retention controls, not hard runtime isolation.
+
+
+### Verification-pending state and recovery
+
+A Raito job configured with both an expected TXID and a pinned verifier enters
+`verifying_raito` when it has finished producing the compressed proof. It
+serves hash-indexed chunks labeled `proof_verified:false` during that phase.
+After a positive Cairo/STWO verifier result and an active-chain recheck it
+becomes `verified_raito`. A verifier rejection returns the job to
+`completed_unverified` with an error, retaining the untrusted bytes under
+the output quota.
+
+A gateway restart during `verifying_raito` likewise restores the job to
+`completed_unverified` without promoting the statement or automatically
+replaying the expensive verifier. Legacy completed outputs remain unverified
+until an independent verifier accepts them.
+
+In-flight `verifying_raito` outputs are pinned against completed-result quota eviction until the verifier finishes. These temporary files still count toward the quota; a sweep evicts older completed outputs first. The maximum number of active worker slots is four and each proof output is capped at 64 MiB. A hard disk quota is still required for workers while they write their outputs.
+
+### Linux memory and swap preflight
+
+Set `SUPERNODE_REQUIRE_CGROUP_MAX_MIB=4096` on the gateway if an operator
+has already installed a **cgroup v2** memory limit for the worker processes.
+The gateway forwards this value to the separately compiled Raito fetcher and
+verifier, which both fail closed if their effective inherited cgroup ancestry
+does not expose a finite `memory.max` at or below that budget together with
+`memory.swap.max=0`. The verifier performs the check before decoding any
+proof.
+
+This check verifies an existing Linux kernel boundary. It does not create
+cgroups, move processes, or provide worker isolation by itself. Configure
+a systemd scope or container cgroup with a limit encompassing descendants of
+the Raito fetch client and STARK verifier. An unset environment variable
+keeps compatibility with development and CI; production must use explicit
+hard limits. The gateway capability response continues to state that a
+hard OS memory limit is not enforced by the gateway itself.
+
+### Retry verification without repeating proof generation
+
+`zk.proof.verify [job_id]` requires the **control token**. It schedules
+verification of an existing `completed_unverified` Raito proof whose original
+job record contains an expected TXID and SHA-256. The dispatcher checks the
+entire retained output digest before admitting work, rechecks Bitcoin Core
+chain placement, and enters `verifying_raito` atomically. The separately
+pinned verifier runs with the same admission and worker-slot budgets as a
+fresh proof. A verifier failure returns the result to
+`completed_unverified`, retaining its original content digest and error for
+inspection. Concurrent or duplicate verification requests are rejected.
+
+The method is designed for recovery after the gateway restarts mid-verification
+or when an operator fixes a policy/configuration problem. A fully evicted
+output must be regenerated or independently restored before verification.
+
+### Process-tree cleanup
+
+On Unix, the gateway launches approved proof-worker and verifier binaries in
+new process groups. A small RAII supervisor sends SIGKILL to the group when
+the worker finishes or the gateway task times out, is cancelled, or is
+dropped. This covers ordinary descendants of the optional Raito fetcher and
+its upstream `raito-spv-client`, preventing common orphan-process leaks.
+
+Programs that intentionally detach into separate sessions or process groups
+can escape this mechanism. Production deployments must additionally keep
+fetcher, verifier and their descendants inside OS-managed cgroups with hard
+memory, swap, disk and process-count limits. The optional cgroup preflight
+checks the inherited kernel boundary but never creates it.
+
+### Bounded active Raito proof outputs
+
+A dedicated Raito output semaphore, capped at the configured worker count
+(maximum four), is held from the start of a Raito proof job through proof
+verification and cleanup. A retry must acquire a free output permit before
+transitioning to `verifying_raito`. Because each worker output is capped at
+64 MiB, no more than four concurrently running/pinned Raito proof outputs
+are admitted (256 MiB total), even when all dispatcher queue slots are
+occupied. Separate from this, retained completed outputs still use the
+oldest-first 256 MiB budget. Kernel disk quotas remain necessary while
+workers write files and for non-Raito worker outputs.
+
+
+### Separate-UID Cairo/STWO verification
+
+`SUPERNODE_PROOF_VERIFIER_SOCKET` and `SUPERNODE_PROOF_VERIFIER_UID`
+enable an independently privileged Raito verifier service. In this mode the
+gateway transfers already-imported compressed proof bytes (at most 16 MiB)
+over authenticated Unix IPC. The receiver recomputes SHA-256, calls its own
+operator-pinned `raito-verify --gateway` executable with `dev=false`, and
+returns a typed receipt only after successful cryptographic verification.
+The gateway checks the returned receipt against the durable job's transaction,
+Bitcoin Core-active block, proof digest, and policy. Proof generation and
+verification require separate Unix identities, each distinct from the
+gateway. The gateway never launches the heavy STARK verifier itself.
+
+For development-only direct execution, set
+`SUPERNODE_ALLOW_SAME_UID_VERIFIER=1`. The production configuration
+uses a broker socket and omits the direct
+`SUPERNODE_RAITO_VERIFIER` executable setting.

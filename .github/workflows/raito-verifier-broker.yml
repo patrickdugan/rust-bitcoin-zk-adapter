@@ -1,0 +1,30 @@
+name: Isolated Raito verifier
+on:
+  push:
+    paths:
+      - 'services/raito-verifier-broker/**'
+      - 'integrations/worker-broker-protocol/**'
+      - '.github/workflows/raito-verifier-broker.yml'
+  pull_request:
+    paths:
+      - 'services/raito-verifier-broker/**'
+      - 'integrations/worker-broker-protocol/**'
+      - '.github/workflows/raito-verifier-broker.yml'
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path integrations/worker-broker-protocol/Cargo.toml -- --check
+      - run: cargo test --manifest-path integrations/worker-broker-protocol/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path integrations/worker-broker-protocol/Cargo.toml --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path services/raito-verifier-broker/Cargo.toml -- --check
+      - run: cargo test --manifest-path services/raito-verifier-broker/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path services/raito-verifier-broker/Cargo.toml --all-targets -- -D warnings
+      - run: cargo build --manifest-path services/raito-verifier-broker/Cargo.toml
+      - run: bash services/raito-verifier-broker/test-separated-uids.sh

@@ -1,0 +1,41 @@
+# Sample deployment only. Ensure /etc/supernode/gateway.env and the
+# Core RPC cookie are accessible only to the gateway identity.
+[Unit]
+Description=Bitcoin Supernode authenticated Rust RPC gateway
+Wants=network-online.target
+After=network-online.target supernode-proof-worker-broker.service supernode-raito-verifier.service
+Requires=supernode-proof-worker-broker.service supernode-raito-verifier.service
+
+[Service]
+Type=simple
+User=supernode-gateway
+Group=supernode-gateway
+SupplementaryGroups=supernode-ipc
+EnvironmentFile=/etc/supernode/gateway.env
+ExecStart=/opt/supernode/bin/rust-bitcoin-supernode-rpc
+StateDirectory=supernode-gateway/jobs supernode-gateway/artifacts
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=64
+KillMode=control-group
+TimeoutStopSec=10s
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
