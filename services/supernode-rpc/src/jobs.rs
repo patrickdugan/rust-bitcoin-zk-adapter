@@ -319,6 +319,13 @@ impl WorkerPrograms {
     }
 }
 
+/// Shared dispatcher limits, including the advisory prover/verifier memory pool.
+#[derive(Debug, Clone, Copy)]
+pub struct JobLimits {
+    pub memory_budget_mib: u32,
+    pub worker_count: usize,
+}
+
 pub struct JobManager {
     root: PathBuf,
     artifacts: Arc<ArtifactStore>,
@@ -351,8 +358,10 @@ impl JobManager {
             chain,
             workers,
             None,
-            memory_budget_mib,
-            worker_count,
+            JobLimits {
+                memory_budget_mib,
+                worker_count,
+            },
         )
     }
 
@@ -363,9 +372,12 @@ impl JobManager {
         chain: Arc<ChainTracker>,
         workers: WorkerPrograms,
         raito_verifier: Option<RaitoVerifier>,
-        memory_budget_mib: u32,
-        worker_count: usize,
+        limits: JobLimits,
     ) -> Result<Arc<Self>, String> {
+        let JobLimits {
+            memory_budget_mib,
+            worker_count,
+        } = limits;
         if let Some(ref verifier) = raito_verifier {
             verifier.validate()?;
         }

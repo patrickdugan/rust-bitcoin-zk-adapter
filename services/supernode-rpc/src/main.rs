@@ -3,7 +3,7 @@ use rust_bitcoin_supernode_rpc::cache::{ArtifactStore, MAX_STORE_BYTES};
 use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
 };
-use rust_bitcoin_supernode_rpc::jobs::{JobManager, WorkerPrograms};
+use rust_bitcoin_supernode_rpc::jobs::{JobLimits, JobManager, WorkerPrograms};
 use rust_bitcoin_supernode_rpc::verification::RaitoVerifier;
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use std::sync::Arc;
@@ -88,8 +88,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tracker.clone(),
             backend,
             verifier,
-            budget,
-            workers,
+            JobLimits {
+                memory_budget_mib: budget,
+                worker_count: workers,
+            },
         )?;
         gateway = gateway.with_job_manager(manager);
     }
