@@ -223,3 +223,23 @@ Proof verification is still a separate process and uses the same admission
 reservation mechanism as proving. Operators must impose OS/cgroup memory
 limits on both binaries. Raito's recursive proof validates its configured
 statement; it cannot independently select Bitcoin's economic canonical chain.
+
+## Real Raito proof fetch worker
+
+For a fully fetched, compressed Raito SPV proof, build the separately compiled
+`integrations/raito-fetcher` binary and configure its operator-owned JSON file
+through `SUPERNODE_RAITO_FETCH_CONFIG=/absolute/path/fetcher-config.json`.
+Set `SUPERNODE_RAITO_PROVER` to the absolute fetcher executable. The gateway
+passes the configuration path only to Raito jobs, and supplies the expected TXID
+as `--expected-txid` alongside the existing worker arguments.
+
+The fetcher runs an independently pinned upstream `raito-spv-client fetch`
+binary, using a local Bitcoin Core credential cookie and an operator-selected
+Raito bridge URL. This process fetches the compressed proof bytes into the
+bounded dispatcher output. The separately pinned `raito-verify` process
+remains solely responsible for publishing a verified STARK statement.
+The default Raito integration is optional and off unless configured.
+
+Both fetch and verification need OS-level limits covering descendants, plus
+per-job disk quotas. The current memory reservation and post-execution
+result cap are admission/retention controls, not hard runtime isolation.

@@ -91,6 +91,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             JobLimits {
                 memory_budget_mib: budget,
                 worker_count: workers,
+                raito_fetch_config: env::var("SUPERNODE_RAITO_FETCH_CONFIG")
+                    .ok()
+                    .map(Into::into),
             },
         )?;
         gateway = gateway.with_job_manager(manager);

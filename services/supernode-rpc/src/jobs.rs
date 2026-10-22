@@ -320,10 +320,12 @@ impl WorkerPrograms {
 }
 
 /// Shared dispatcher limits, including the advisory prover/verifier memory pool.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct JobLimits {
     pub memory_budget_mib: u32,
     pub worker_count: usize,
+    /// Operator-owned configuration; only forwarded to approved Raito workers.
+    pub raito_fetch_config: Option<PathBuf>,
 }
 
 pub struct JobManager {
@@ -333,6 +335,7 @@ pub struct JobManager {
     chain: Arc<ChainTracker>,
     workers: WorkerPrograms,
     raito_verifier: Option<RaitoVerifier>,
+    raito_fetch_config: Option<PathBuf>,
     memory: Arc<Semaphore>,
     slots: Arc<Semaphore>,
     queue_slots: Arc<Semaphore>,
@@ -361,6 +364,7 @@ impl JobManager {
             JobLimits {
                 memory_budget_mib,
                 worker_count,
+                raito_fetch_config: None,
             },
         )
     }
@@ -377,7 +381,17 @@ impl JobManager {
         let JobLimits {
             memory_budget_mib,
             worker_count,
+            raito_fetch_config,
         } = limits;
+        if let Some(ref path) = raito_fetch_config {
+            if !path.is_absolute()
+                || !fs::symlink_metadata(path)
+                    .map(|m| m.file_type().is_file())
+                    .unwrap_or(false)
+            {
+                return Err("Raito fetch configuration must be an absolute regular file".into());
+            }
+        }
         if let Some(ref verifier) = raito_verifier {
             verifier.validate()?;
         }
@@ -479,6 +493,7 @@ impl JobManager {
             chain,
             workers,
             raito_verifier,
+            raito_fetch_config,
             memory: Arc::new(Semaphore::new(memory_budget_mib as usize)),
             slots: Arc::new(Semaphore::new(worker_count)),
             queue_slots: Arc::new(Semaphore::new(MAX_PENDING_JOBS)),
@@ -493,6 +508,7 @@ impl JobManager {
             "queue_enabled":true,
             "raito_worker_configured":self.workers.enabled(&JobKind::Raito),
             "raito_verifier_configured":self.raito_verifier.is_some(),
+            "raito_fetch_configured":self.raito_fetch_config.is_some(),
             "shinigami_worker_configured":self.workers.enabled(&JobKind::Shinigami),
             "max_pending":MAX_PENDING_JOBS,
             "max_worker_count":self.worker_count,
@@ -861,6 +877,16 @@ impl JobManager {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .kill_on_drop(true);
+            if record.kind == JobKind::Raito {
+                // TXID and fetch-config come from a canonical job record and
+                // operator-owned gateway configuration, never an RPC command.
+                if let Some(ref txid) = record.expected_txid {
+                    cmd.arg("--expected-txid").arg(txid);
+                }
+                if let Some(ref config) = self.raito_fetch_config {
+                    cmd.env("SUPERNODE_RAITO_FETCH_CONFIG", config);
+                }
+            }
 
             let status = timeout(MAX_WORKER_DURATION, cmd.status())
                 .await
