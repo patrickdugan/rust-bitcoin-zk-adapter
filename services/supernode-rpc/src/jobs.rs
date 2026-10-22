@@ -724,10 +724,58 @@ mod tests {
             finished_unix: None,
         };
         atomic_json(&jobs.root, &record).unwrap();
+        let abandoned_input = jobs.root.join(format!("{}.input", record.id));
+        let abandoned_output = jobs.root.join(format!("{}.output", record.id));
+        fs::write(&abandoned_input, b"stale-input").unwrap();
+        fs::write(&abandoned_output, b"stale-output").unwrap();
         let restarted = manager(&dir);
+        assert!(!abandoned_input.exists());
+        assert!(!abandoned_output.exists());
         let status = restarted.status(&record.id).await.unwrap();
         assert_eq!(status.status, JobStatus::Interrupted);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+
+    #[test]
+    fn total_retained_result_quota_evicts_oldest_records() {
+        let directory = tmp("result-quota");
+        fs::create_dir_all(&directory).unwrap();
+        let mut records = BTreeMap::new();
+        for index in 1..=3u8 {
+            let id = format!("{index:064x}");
+            let bytes = vec![index; 6];
+            fs::write(directory.join(format!("{id}.output")), &bytes).unwrap();
+            let record = JobRecord {
+                id: id.clone(),
+                kind: JobKind::Raito,
+                input_artifact_id: "ee".repeat(32),
+                network: "regtest".into(),
+                block_hash: "ab".repeat(32),
+                block_height: 42,
+                chain_epoch: 0,
+                policy_sha256: "dd".repeat(32),
+                estimated_memory_mib: 1,
+                status: JobStatus::CompletedUnverified,
+                result_sha256: Some(hash_bytes(&bytes)),
+                result_bytes: Some(bytes.len() as u64),
+                error: None,
+                submitted_unix: index as u64,
+                finished_unix: Some(100),
+            };
+            records.insert(id.clone(), record);
+        }
+        prune_result_files(&directory, &mut records, 12).unwrap();
+        let oldest_id = format!("{:064x}", 1u8);
+        assert_eq!(records[&oldest_id].status, JobStatus::OutputEvicted);
+        assert_eq!(records[&oldest_id].result_sha256, Some(hash_bytes(&[1; 6])));
+        assert!(!directory.join(format!("{oldest_id}.output")).exists());
+        for index in [2u8, 3u8] {
+            let id = format!("{index:064x}");
+            assert_eq!(records[&id].status, JobStatus::CompletedUnverified);
+            assert!(directory.join(format!("{id}.output")).exists());
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
@@ -821,6 +869,29 @@ mod tests {
         .unwrap();
         assert_eq!(completed.status, JobStatus::CompletedUnverified);
         assert_eq!(completed.result_sha256, Some(hash_bytes(content)));
+        assert_eq!(completed.result_bytes, Some(content.len() as u64));
+
+        let first = jobs.result_chunk(&queued.id, 0, 8).await.unwrap();
+        assert_eq!(first["proof_verified"], false);
+        assert_eq!(
+            hex::decode(first["data_hex"].as_str().unwrap()).unwrap(),
+            content[..8]
+        );
+        assert_eq!(first["next_offset"], 8);
+        assert_eq!(first["complete"], false);
+        let final_chunk = jobs.result_chunk(&queued.id, 8, MAX_RESULT_CHUNK_BYTES).await.unwrap();
+        assert_eq!(
+            hex::decode(final_chunk["data_hex"].as_str().unwrap()).unwrap(),
+            content[8..]
+        );
+        assert_eq!(final_chunk["complete"], true);
+        assert!(jobs.result_chunk(&queued.id, 0, MAX_RESULT_CHUNK_BYTES + 1).await.is_err());
+        assert!(jobs.result_chunk(&queued.id, content.len() as u64 + 1, 16).await.is_err());
+
+        let result_path = jobs.root.join(format!("{}.output", queued.id));
+        fs::write(&result_path, b"tampered-result").unwrap();
+        assert!(jobs.result_chunk(&queued.id, 0, 10).await.is_err());
+        fs::write(&result_path, content).unwrap();
 
         active_hash.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(jobs.check_chain(&completed).await.is_err());
