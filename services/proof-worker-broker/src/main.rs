@@ -120,7 +120,8 @@ fn load_config() -> Result<Config, String> {
         .map_err(|e| e.to_string())?
         .parse()
         .map_err(|_| "invalid gateway UID")?;
-    if gateway_uid == 0 || nix::unistd::Uid::effective().is_root()
+    if gateway_uid == 0
+        || nix::unistd::Uid::effective().is_root()
         || gateway_uid == nix::unistd::Uid::effective().as_raw()
     {
         return Err("broker and gateway require distinct unprivileged OS UIDs".into());
