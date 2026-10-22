@@ -58,7 +58,7 @@ pub fn verify_tx_merkle_root(
         } else if sibling == node {
             return Err(MerkleError::MutatedPair);
         }
-        node = if index % 2 == 0 {
+        node = if index.is_multiple_of(2) {
             parent(node, sibling)
         } else {
             parent(sibling, node)
