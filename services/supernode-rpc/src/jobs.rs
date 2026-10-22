@@ -922,6 +922,7 @@ mod tests {
                 status: JobStatus::CompletedUnverified,
                 result_sha256: Some(hash_bytes(&bytes)),
                 result_bytes: Some(bytes.len() as u64),
+                result_chunk_index_sha256: None,
                 error: None,
                 submitted_unix: index as u64,
                 finished_unix: Some(100),
