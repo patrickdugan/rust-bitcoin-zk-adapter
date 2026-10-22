@@ -1686,7 +1686,10 @@ mod tests {
         )
         .unwrap();
         assert!(tampered_load.verified_receipt(&started.id).await.is_err());
-        assert!(tampered_load.result_chunk(&started.id, 0, 20).await.is_err());
+        assert!(tampered_load
+            .result_chunk(&started.id, 0, 20)
+            .await
+            .is_err());
         atomic_json(&manager.root, &finished).unwrap();
         active.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(manager.verified_receipt(&started.id).await.is_err());
