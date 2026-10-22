@@ -246,7 +246,7 @@ async fn accept_one(
     if peer.uid() != config.gateway_uid {
         return Err("unauthorized gateway UID at broker socket".into());
     }
-    let request: RunRequest = timeout(MAX_CLIENT_DURATION, read_header(&mut stream))
+    let request: RunRequest = timeout(MAX_CLIENT_DURATION, read_header(&mut *stream))
         .await
         .map_err(|_| "broker input header timed out")??;
     request.validate()?;
