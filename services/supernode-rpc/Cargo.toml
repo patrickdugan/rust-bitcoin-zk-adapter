@@ -15,9 +15,10 @@ bitcoin = "=0.32.102"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "process", "io-util", "fs"] }
 zeromq = "0.6"
 serde = { version = "1", features = ["derive"] }
+supernode-worker-broker-protocol = { path = "../../integrations/worker-broker-protocol" }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
+nix = { version = "0.29", default-features = false, features = ["process", "signal", "user"] }

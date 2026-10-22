@@ -1,4 +1,6 @@
 //! Locally bound authenticated Bitcoin Core RPC superset.
+#[cfg(unix)]
+use rust_bitcoin_supernode_rpc::broker::BrokerClient;
 use rust_bitcoin_supernode_rpc::cache::{ArtifactStore, MAX_STORE_BYTES};
 use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
@@ -79,6 +81,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let workers: usize = env::var("SUPERNODE_PROOF_WORKERS")
             .unwrap_or_else(|_| "1".into())
             .parse()?;
+        #[cfg(unix)]
+        let broker_socket = env::var("SUPERNODE_PROOF_BROKER_SOCKET").ok();
+        #[cfg(not(unix))]
+        let broker_socket: Option<String> = None;
+        if broker_socket.is_some()
+            && (env::var("SUPERNODE_RAITO_PROVER").is_ok()
+                || env::var("SUPERNODE_SHINIGAMI_PROVER").is_ok()
+                || env::var("SUPERNODE_RAITO_FETCH_CONFIG").is_ok())
+        {
+            return Err("isolated broker owns worker binaries/config; remove gateway direct-worker settings".into());
+        }
+        if broker_socket.is_none()
+            && (env::var("SUPERNODE_RAITO_PROVER").is_ok()
+                || env::var("SUPERNODE_SHINIGAMI_PROVER").is_ok())
+            && env::var("SUPERNODE_ALLOW_SAME_UID_WORKERS").as_deref() != Ok("1")
+        {
+            return Err(
+                "direct same-UID worker execution needs explicit development opt-in".into(),
+            );
+        }
         let backend = WorkerPrograms {
             raito: env::var("SUPERNODE_RAITO_PROVER").ok().map(Into::into),
             shinigami: env::var("SUPERNODE_SHINIGAMI_PROVER").ok().map(Into::into),
@@ -105,6 +127,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map(Into::into),
             },
         )?;
+        #[cfg(unix)]
+        let manager = if let Some(socket) = broker_socket {
+            let uid: u32 = env::var("SUPERNODE_PROOF_BROKER_UID")?.parse()?;
+            if uid == nix::unistd::Uid::effective().as_raw() {
+                return Err("broker must run with a UID distinct from gateway".into());
+            }
+            manager.with_broker(BrokerClient::new(socket.into(), uid)?)?
+        } else {
+            manager
+        };
         gateway = gateway.with_job_manager(manager);
     }
     if let Some(url) = endpoint {
