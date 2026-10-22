@@ -119,6 +119,61 @@ fn write_chunk_index(root: &Path, id: &str, index: &[u8]) -> Result<(), String> 
     fs::rename(temporary, output).map_err(|err| err.to_string())
 }
 
+/// Read only the aligned chunks touched by the requested slice. Each chunk
+/// is authenticated against the small digest index stored alongside the job.
+fn indexed_chunk(
+    root: &Path,
+    id: &str,
+    expected_index_sha: &str,
+    length: u64,
+    offset: u64,
+    requested: usize,
+) -> Result<Vec<u8>, String> {
+    let path = root.join(format!("{id}.output"));
+    let meta = fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
+    if !meta.file_type().is_file() || meta.len() != length {
+        return Err("worker result no longer has the expected length".into());
+    }
+    let index_path = root.join(format!("{id}.chunks"));
+    let expected_count = length.div_ceil(MAX_RESULT_CHUNK_BYTES as u64) as usize;
+    let index_meta = fs::symlink_metadata(&index_path).map_err(|err| err.to_string())?;
+    if !index_meta.file_type().is_file() || index_meta.len() != (expected_count * 32) as u64 {
+        return Err("worker chunk index absent or incorrect length".into());
+    }
+    let index = fs::read(index_path).map_err(|err| err.to_string())?;
+    if hash_bytes(&index) != expected_index_sha {
+        return Err("worker chunk index failed SHA-256 integrity check".into());
+    }
+    if requested == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(&path).map_err(|err| err.to_string())?;
+    let end = offset + requested as u64;
+    let first = offset / MAX_RESULT_CHUNK_BYTES as u64;
+    let last = (end - 1) / MAX_RESULT_CHUNK_BYTES as u64;
+    let mut answer = Vec::with_capacity(requested);
+    for chunk_no in first..=last {
+        let start = chunk_no * MAX_RESULT_CHUNK_BYTES as u64;
+        let len = (length - start).min(MAX_RESULT_CHUNK_BYTES as u64) as usize;
+        let mut chunk = vec![0u8; len];
+        file.seek(SeekFrom::Start(start)).map_err(|err| err.to_string())?;
+        file.read_exact(&mut chunk).map_err(|err| err.to_string())?;
+        let hash_start = chunk_no as usize * 32;
+        let digest = sha256::Hash::hash(&chunk).to_byte_array();
+        if digest[..] != index[hash_start..hash_start + 32] {
+            return Err("worker output chunk failed SHA-256 integrity check".into());
+        }
+        let begin = (offset.max(start) - start) as usize;
+        let finish = (end.min(start + len as u64) - start) as usize;
+        answer.extend_from_slice(&chunk[begin..finish]);
+    }
+    let end_meta = file.metadata().map_err(|err| err.to_string())?;
+    if end_meta.len() != length {
+        return Err("worker result size changed during reading".into());
+    }
+    Ok(answer)
+}
+
 /// Bound the total amount of *retained* worker output. An evicted job keeps
 /// its SHA-256 audit digest but cannot serve stale data to RPC consumers.
 fn prune_result_files(
@@ -540,31 +595,41 @@ impl JobManager {
         }
         self.check_chain(&record).await?;
         let path = self.root.join(format!("{id}.output"));
-        let (actual_digest, length) = checked_result_digest(&path)?;
-        if record.result_sha256.as_deref() != Some(actual_digest.as_str())
-            || record
-                .result_bytes
-                .is_some_and(|expected| expected != length)
+        let metadata = fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
+        if !metadata.file_type().is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_WORKER_OUTPUT_BYTES
         {
-            return Err("retained output failed SHA-256 or size verification".into());
+            return Err("retained output absent or unsafe".into());
+        }
+        let length = metadata.len();
+        if record.result_bytes.is_some_and(|expected| expected != length) {
+            return Err("retained output length mismatch".into());
         }
         if offset > length {
             return Err("result chunk offset out of range".into());
         }
         let count = requested.min((length - offset) as usize);
-        let mut file = File::open(&path).map_err(|err| err.to_string())?;
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|err| err.to_string())?;
-        let mut chunk = vec![0u8; count];
-        file.read_exact(&mut chunk).map_err(|err| err.to_string())?;
-        let metadata = file.metadata().map_err(|err| err.to_string())?;
-        if metadata.len() != length {
-            return Err("output changed while reading chunk".into());
-        }
+        // Indexed outputs need at most two 64 KiB reads. Older records are
+        // supported with the slower whole-file digest fallback.
+        let chunk = if let Some(index_sha) = record.result_chunk_index_sha256.as_deref() {
+            indexed_chunk(&self.root, id, index_sha, length, offset, count)?
+        } else {
+            let (digest, checked_length, _) = checked_result_digest(&path)?;
+            if checked_length != length || record.result_sha256.as_deref() != Some(&digest) {
+                return Err("legacy output failed full SHA-256 verification".into());
+            }
+            let mut file = File::open(&path).map_err(|err| err.to_string())?;
+            file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
+            let mut buf = vec![0u8; count];
+            file.read_exact(&mut buf).map_err(|err| err.to_string())?;
+            buf
+        };
         self.check_chain(&record).await?;
         Ok(json!({
             "job_id":id,
-            "result_sha256":actual_digest,
+            "result_sha256":record.result_sha256,
+            "chunk_index_sha256":record.result_chunk_index_sha256,
             "total_bytes":length,
             "offset":offset,
             "data_hex":hex::encode(chunk),
