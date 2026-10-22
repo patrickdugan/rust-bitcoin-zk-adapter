@@ -50,3 +50,42 @@ the exact compressed bytes that were decoded. The gateway verifies those
 fields against the persistent job record and the worker's own SHA-256. Its
 separate executable pin prevents accidental substitution with a mock or
 different upstream verifier.
+
+
+### Operator policy digest and live proof validation
+
+The separately built verifier can print its exact pinned default policy
+digest with `raito-verify --policy-sha256`. Include that SHA-256 as the
+`policy_sha256` argument to the dispatcher. The executable itself must be
+pinned by the operator through `SUPERNODE_RAITO_VERIFIER_SHA256`.
+
+A live compressed proof can be obtained with upstream `raito-spv-client fetch`
+for an already-confirmed Bitcoin transaction and validated independently:
+
+```sh
+raito-spv-client fetch --txid "$TXID" \
+  --proof-path ./proof.bin.bz2 \
+  --bitcoin-rpc-url http://127.0.0.1:8332 \
+  --bitcoin-rpc-userpwd "$CORE_USERPWD" \
+  --raito-rpc-url https://api.raito.wtf --verify
+
+raito-verify ./proof.bin.bz2 "$TXID" "$BLOCK_HEIGHT"
+raito-verify --policy-sha256
+sha256sum /absolute/path/to/raito-verify
+```
+
+For gateway acceptance, a separately configured, approved Raito **worker**
+must write those exact compressed proof bytes to its `--output` path. That
+worker follows the dispatcher argument contract in the Supernode README.
+The read/control tokens remain distinct. Submit a Raito job with
+`["raito",artifact_id,memory_mib,policy_sha256,expected_txid]`. A valid
+result moves to `verified_raito`; inspect it using
+`zk.proof.receipt [job_id]` and `zk.proof.get [job_id,offset,max_bytes]`.
+An invalid or unsupported proof remains `completed_unverified`.
+
+The gateway's JSON input limit is 64 KiB and its artifact cache limits
+individual inputs to 2 MiB. Large proof staging needs an operator-approved
+worker or a future bounded streaming/import interface. The bridge's
+availability, supported heights and proof policy must be confirmed in the
+actual deployment. Record peak RSS and wall clock time for the independent
+prover and verifier before assigning production resource limits.

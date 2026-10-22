@@ -1,6 +1,6 @@
 //! Trust boundary between durable worker output and an operator-pinned
 //! Raito STARK verifier. A digest or a worker's exit code never proves a claim.
-use crate::jobs::JobRecord;
+use crate::jobs::{JobKind, JobRecord};
 use bitcoin::hashes::{sha256, Hash, HashEngine};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -151,7 +151,8 @@ pub struct RaitoVerifiedReceipt {
 
 impl RaitoVerifiedReceipt {
     pub fn validate(&self, record: &JobRecord, expected_digest: &str) -> Result<(), String> {
-        if self.statement != STATEMENT
+        if record.kind != JobKind::Raito
+            || self.statement != STATEMENT
             || self.verifier != VERIFIER_ID
             || record.expected_txid.as_deref() != Some(self.txid.as_str())
             || self.block_hash != record.block_hash

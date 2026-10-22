@@ -696,6 +696,11 @@ impl JobManager {
         if record.status != JobStatus::CompletedUnverified {
             return Err("job output was evicted before verification completed".into());
         }
+        let digest = record
+            .result_sha256
+            .as_deref()
+            .ok_or("job has no recorded proof digest")?;
+        report.validate(record, digest)?;
         let mut updated = record.clone();
         updated.status = JobStatus::VerifiedRaito;
         updated.error = None;
@@ -708,10 +713,18 @@ impl JobManager {
 
     pub async fn verified_receipt(&self, id: &str) -> Result<Value, String> {
         let record = self.status(id).await?;
+        if !matches!(record.status, JobStatus::VerifiedRaito | JobStatus::OutputEvicted) {
+            return Err("job does not have a verified Raito status".into());
+        }
         let receipt = record
             .verified_raito
             .as_ref()
             .ok_or("Raito proof has no verified receipt")?;
+        let digest = record
+            .result_sha256
+            .as_deref()
+            .ok_or("job has no recorded proof digest")?;
+        receipt.validate(&record, digest)?;
         self.check_chain(&record).await?;
         Ok(json!({
             "job_id":record.id,
@@ -1129,6 +1142,64 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn verified_raito_receipt_survives_quota_eviction_and_restart() {
+        let directory = tmp("verified-retention");
+        fs::create_dir_all(&directory).unwrap();
+        let id = "ab".repeat(32);
+        let bytes = b"synthetic-receipt-retention-test";
+        fs::write(directory.join(format!("{id}.output")), bytes).unwrap();
+        let receipt = RaitoVerifiedReceipt {
+            statement: crate::verification::STATEMENT.into(),
+            verifier: crate::verification::VERIFIER_ID.into(),
+            txid: "12".repeat(32),
+            block_hash: "34".repeat(32),
+            block_height: 71,
+            proven_tip_height: 74,
+            tx_index: 1,
+            proof_sha256: hash_bytes(bytes),
+            policy_sha256: "56".repeat(32),
+        };
+        let record = JobRecord {
+            id: id.clone(),
+            kind: JobKind::Raito,
+            input_artifact_id: "78".repeat(32),
+            network: "regtest".into(),
+            block_hash: receipt.block_hash.clone(),
+            block_height: 71,
+            chain_epoch: 0,
+            policy_sha256: receipt.policy_sha256.clone(),
+            estimated_memory_mib: 1,
+            expected_txid: Some(receipt.txid.clone()),
+            status: JobStatus::VerifiedRaito,
+            result_sha256: Some(receipt.proof_sha256.clone()),
+            result_bytes: Some(bytes.len() as u64),
+            result_chunk_index_sha256: None,
+            verified_raito: Some(receipt.clone()),
+            error: None,
+            submitted_unix: 1,
+            finished_unix: Some(2),
+        };
+        atomic_json(&directory, &record).unwrap();
+        let mut records = BTreeMap::from([(id.clone(), record)]);
+        prune_result_files(&directory, &mut records, 0).unwrap();
+        assert_eq!(records[&id].status, JobStatus::OutputEvicted);
+        assert!(records[&id].result_bytes.is_none());
+        assert_eq!(records[&id].verified_raito.as_ref(), Some(&receipt));
+        assert!(receipt
+            .validate(&records[&id], &hash_bytes(bytes))
+            .is_ok());
+        assert!(!directory.join(format!("{id}.output")).exists());
+
+        let reloaded: JobRecord =
+            serde_json::from_slice(&fs::read(directory.join(format!("{id}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(reloaded.status, JobStatus::OutputEvicted);
+        assert_eq!(reloaded.verified_raito, Some(receipt));
+        assert_eq!(reloaded.result_sha256, Some(hash_bytes(bytes)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn approved_worker_runs_and_receipt_is_explicitly_unverified() {
@@ -1231,6 +1302,7 @@ mod tests {
 
         let first = jobs.result_chunk(&queued.id, 0, 8).await.unwrap();
         assert_eq!(first["proof_verified"], false);
+        assert!(jobs.verified_receipt(&queued.id).await.is_err());
         assert_eq!(
             hex::decode(first["data_hex"].as_str().unwrap()).unwrap(),
             content[..8]

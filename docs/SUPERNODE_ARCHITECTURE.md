@@ -2,7 +2,9 @@
 
 **Status as of 2026-10-22:** A bounded Rust RPC gateway, ZMQ sequence
 monitor, disk-backed artifact store, durable proof-job dispatcher and an
-independently compiled, upstream-pinned Raito verifier exist. Bitcoin
+independently compiled, upstream-pinned Raito verifier exist. The optional
+verifier is now connected to the dispatcher, with typed receipts for proofs
+accepted under the pinned Raito policy. Bitcoin
 Core continues to validate Bitcoin consensus. Full-block STARK proving,
 Shinigami execution proofs and an Ark VTXO integration are planned services.
 
@@ -78,7 +80,10 @@ storage/cache from volatile proof generation. The figures below are
 Multiple Core RPC calls can coexist inside one gateway request. Account for
 several response buffers and decoded JSON objects per request. A workload
 with large blocks can peak far above the nominal per-response cap. The
-gateway currently has **no persistent proof queue and no LRU cache**.
+gateway has a durable dispatcher that records work across restarts but marks
+interrupted jobs rather than automatically replaying them. The artifact cache
+uses bounded content-addressed storage; proof outputs are subject to a
+256 MiB retention quota and oldest-first eviction.
 
 ## Efficient proving workflow
 
@@ -100,14 +105,33 @@ confirmations remain time-sensitive and require refresh even when a proof
 is content-addressed. ZMQ sequence notifications should invalidate
 height-to-hash lookups across reorgs.
 
+## Verified statement boundary
+
+An approved Raito worker supplies a compressed SPV artifact to the
+dispatcher. A separately installed and SHA-256-pinned verifier executable
+runs the upstream Raito STARK verifier in non-development mode with a fixed
+`VerifierConfig`. Successful receipt publication requires an expected TXID,
+the proof file's SHA-256, the Bitcoin Core-active block hash and height, and
+the policy configuration digest to agree. Without that verification, the job
+stays `completed_unverified`.
+
+The `verified_raito` state is a versioned transaction-inclusion statement
+under Raito's policy, with its TXID, block hash, chain proof height and index.
+It is distinct from economic canonical-chain choice and from full Bitcoin
+consensus execution. The read-only `zk.proof.receipt` endpoint rechecks the
+active chain before returning a statement, including after output eviction.
+Live proof acceptance remains an operator-run integration test, and OS memory
+isolation is still required for prover and verifier binaries.
+
 ## Planned interfaces
 
 - zk.getblockcontext(blockhash): provable block-input manifest, heavy data
   streamed through disk with bounded memory.
-- zk.proof.get and cancellation: publishing verified output artifacts and
-  cleanly stopping an active worker are still pending; submit/status exist.
-- zk.raito.verify: type-safe STARK verifier endpoint with explicit program
-  hashes, work requirements and proof provenance.
+- zk.proof.submit/status/get/receipt: durable dispatch, 64 KiB chunk-indexed
+  retrieval and optional Raito verified statements exist. Worker cancellation
+  and an HTTP binary streaming interface remain future work.
+- zk.raito.verify: a dedicated submission/verification API with operator-chosen
+  policy versions beyond the pinned default remains future work.
 - zk.shinigami.prepare: script witness bundle; execution/proof worker remains
   separate from the gateway.
 - zk.watch: a future push API for the implemented ZMQ sequence tracking.

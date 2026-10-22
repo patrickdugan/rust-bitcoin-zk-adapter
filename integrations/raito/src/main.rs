@@ -65,6 +65,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if first == "--gateway" {
         return gateway(&mut args).await;
     }
+    if first == "--policy-sha256" {
+        if args.next().is_some() {
+            return Err("unexpected policy digest argument".into());
+        }
+        let config = VerifierConfig::default();
+        println!("{}", sha256::Hash::hash(&serde_json::to_vec(&config)?));
+        return Ok(());
+    }
 
     let path = PathBuf::from(first);
     let expected = Txid::from_str(&args.next().ok_or("missing expected txid")?)?;
