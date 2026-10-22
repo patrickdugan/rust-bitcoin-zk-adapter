@@ -1251,9 +1251,8 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-
     #[test]
-    fn retention_never_evits_an_inflight_raito_verifier() {
+    fn retention_never_evicts_an_inflight_raito_verifier() {
         let directory = tmp("quota-verifier");
         fs::create_dir_all(&directory).unwrap();
         let mut records = BTreeMap::new();
@@ -1292,7 +1291,10 @@ mod tests {
         prune_result_files(&directory, &mut records, 6).unwrap();
         let pinned_id = format!("{:064x}", 2u8);
         assert_eq!(records[&pinned_id].status, JobStatus::VerifyingRaito);
-        assert_eq!(fs::read(directory.join(format!("{pinned_id}.output"))).unwrap(), vec![2; 6]);
+        assert_eq!(
+            fs::read(directory.join(format!("{pinned_id}.output"))).unwrap(),
+            vec![2; 6]
+        );
         for index in [1u8, 3u8] {
             let id = format!("{index:064x}");
             assert_eq!(records[&id].status, JobStatus::OutputEvicted);

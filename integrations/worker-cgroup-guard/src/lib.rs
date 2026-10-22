@@ -50,7 +50,7 @@ fn verify_linux_cgroup(root: &Path, current: &str, max_bytes: u64) -> Result<(),
     let mut location = root.to_path_buf();
     for component in Path::new(relative).components() {
         match component {
-            std::path::Component::RootDir => {},
+            std::path::Component::RootDir => {}
             std::path::Component::Normal(segment) => location.push(segment),
             _ => return Err("unsafe process cgroup membership".into()),
         }
@@ -59,7 +59,10 @@ fn verify_linux_cgroup(root: &Path, current: &str, max_bytes: u64) -> Result<(),
     // from the cgroup2 mount. A finite mount-root limit is still an ancestor
     // cap. Otherwise fail closed when the resolved leaf is inaccessible.
     let candidates = if location.exists() {
-        location.ancestors().take_while(|p| p.starts_with(root)).collect::<Vec<_>>()
+        location
+            .ancestors()
+            .take_while(|p| p.starts_with(root))
+            .collect::<Vec<_>>()
     } else {
         vec![root]
     };
@@ -94,11 +97,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_limit_rejects_unbounded_and_swap_enabled() {
-        use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
         let root = env::temp_dir().join(format!(
             "supernode-cgroup-gate-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(root.join("node.service")).unwrap();
         fs::write(root.join("cgroup.controllers"), "memory pids io").unwrap();
@@ -120,17 +129,25 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn root_limit_works_in_private_cgroup_namespace() {
-        use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
         let root = env::temp_dir().join(format!(
             "supernode-cgroup-root-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("cgroup.controllers"), "memory").unwrap();
         fs::write(root.join("memory.max"), "268435456").unwrap();
         fs::write(root.join("memory.swap.max"), "0").unwrap();
-        assert!(verify_linux_cgroup(&root, "0::/child-hidden-in-namespace", 512 * 1024 * 1024).is_ok());
+        assert!(
+            verify_linux_cgroup(&root, "0::/child-hidden-in-namespace", 512 * 1024 * 1024).is_ok()
+        );
         assert!(verify_linux_cgroup(&root, "not a v2 cgroup", 512 * 1024 * 1024).is_err());
         assert!(verify_linux_cgroup(&root, "0::/../escape", 512 * 1024 * 1024).is_err());
         fs::remove_dir_all(root).unwrap();
