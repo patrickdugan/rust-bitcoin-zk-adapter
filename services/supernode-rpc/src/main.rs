@@ -87,6 +87,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let broker_socket = env::var("SUPERNODE_PROOF_BROKER_SOCKET").ok();
         #[cfg(not(unix))]
         let broker_socket: Option<String> = None;
+        #[cfg(unix)]
+        if broker_socket.is_some() && nix::unistd::Uid::effective().is_root() {
+            return Err("isolated Supernode gateway must use an unprivileged OS UID".into());
+        }
         if broker_socket.is_some()
             && (env::var("SUPERNODE_RAITO_PROVER").is_ok()
                 || env::var("SUPERNODE_SHINIGAMI_PROVER").is_ok()

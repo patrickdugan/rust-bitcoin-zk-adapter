@@ -122,6 +122,8 @@ fn load_config() -> Result<Config, String> {
         .parse()
         .map_err(|_| "invalid producer UID")?;
     if current_uid == 0
+        || gateway_uid == 0
+        || producer_uid == 0
         || current_uid == gateway_uid
         || current_uid == producer_uid
         || gateway_uid == producer_uid
