@@ -79,38 +79,44 @@ fn hash_bytes(bytes: &[u8]) -> String {
     hex::encode(sha256::Hash::hash(bytes).to_byte_array())
 }
 
-/// Hash worker output in a fixed 64 KiB buffer. Large proof files never
-/// enter the RPC process's heap as a single allocation.
-fn checked_result_digest(path: &Path) -> Result<(String, u64), String> {
+/// Calculate one full result digest and a hash for each aligned 64 KiB
+/// chunk using a fixed buffer. The index is at most 32 KiB for a 64 MiB file.
+fn checked_result_digest(path: &Path) -> Result<(String, u64, Vec<u8>), String> {
     let metadata = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
-    if !metadata.file_type().is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_WORKER_OUTPUT_BYTES
-    {
-        return Err("worker output missing, not a regular file, or exceeds limit".into());
+    if !metadata.file_type().is_file() || metadata.len() == 0 ||
+        metadata.len() > MAX_WORKER_OUTPUT_BYTES {
+        return Err("worker output absent, unsafe or over size cap".into());
     }
     let mut file = File::open(path).map_err(|err| err.to_string())?;
-    let mut sha = sha256::Hash::engine();
-    let mut buf = [0u8; 64 * 1024];
-    let mut read_bytes = 0u64;
-    loop {
-        let count = file.read(&mut buf).map_err(|err| err.to_string())?;
-        if count == 0 {
-            break;
-        }
-        read_bytes += count as u64;
-        if read_bytes > MAX_WORKER_OUTPUT_BYTES {
-            return Err("worker output grew past size limit".into());
-        }
-        sha.input(&buf[..count]);
+    let mut whole = sha256::Hash::engine();
+    let mut indexes = Vec::new();
+    let mut buffer = [0u8; MAX_RESULT_CHUNK_BYTES];
+    let mut offset = 0u64;
+    while offset < metadata.len() {
+        let n = (metadata.len() - offset).min(MAX_RESULT_CHUNK_BYTES as u64) as usize;
+        file.read_exact(&mut buffer[..n]).map_err(|err| err.to_string())?;
+        whole.input(&buffer[..n]);
+        indexes.extend_from_slice(sha256::Hash::hash(&buffer[..n]).as_byte_array());
+        offset += n as u64;
     }
-    if read_bytes != metadata.len() {
-        return Err("worker output changed while being hashed".into());
+    let mut extra = [0u8; 1];
+    if file.read(&mut extra).map_err(|err| err.to_string())? != 0 {
+        return Err("worker output changed while hashing".into());
     }
-    Ok((
-        hex::encode(sha256::Hash::from_engine(sha).to_byte_array()),
-        read_bytes,
-    ))
+    Ok((hex::encode(sha256::Hash::from_engine(whole).to_byte_array()), offset, indexes))
+}
+
+/// Publish the small chunk index atomically and bind it to the job record.
+fn write_chunk_index(root: &Path, id: &str, index: &[u8]) -> Result<(), String> {
+    let output = root.join(format!("{id}.chunks"));
+    let ns = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?.as_nanos();
+    let temporary = root.join(format!("{id}.tmp-{}-{ns}", std::process::id()));
+    let mut file = OpenOptions::new().write(true).create_new(true)
+        .open(&temporary).map_err(|err| err.to_string())?;
+    file.write_all(index).map_err(|err| err.to_string())?;
+    file.sync_all().map_err(|err| err.to_string())?;
+    fs::rename(temporary, output).map_err(|err| err.to_string())
 }
 
 /// Bound the total amount of *retained* worker output. An evicted job keeps
@@ -153,6 +159,7 @@ fn prune_result_files(
         let record = records.get_mut(&id).ok_or("retained result missing")?;
         let path = root.join(format!("{id}.output"));
         fs::remove_file(&path).map_err(|err| err.to_string())?;
+        let _ = fs::remove_file(root.join(format!("{id}.chunks")));
         total = total.saturating_sub(size);
         record.status = JobStatus::OutputEvicted;
         record.result_bytes = None;
@@ -205,6 +212,8 @@ pub struct JobRecord {
     pub result_sha256: Option<String>,
     #[serde(default)]
     pub result_bytes: Option<u64>,
+    #[serde(default)]
+    pub result_chunk_index_sha256: Option<String>,
     pub error: Option<String>,
     pub submitted_unix: u64,
     pub finished_unix: Option<u64>,
@@ -312,6 +321,7 @@ impl JobManager {
                 let _ = fs::remove_file(root.join(format!("{id}.json")));
                 let _ = fs::remove_file(root.join(format!("{id}.input")));
                 let _ = fs::remove_file(root.join(format!("{id}.output")));
+                let _ = fs::remove_file(root.join(format!("{id}.chunks")));
             }
         }
         // Orphaned inputs and failed/abandoned outputs are not retained
@@ -319,7 +329,9 @@ impl JobManager {
         for entry in fs::read_dir(&root).map_err(|err| err.to_string())? {
             let entry = entry.map_err(|err| err.to_string())?;
             let name = entry.file_name().to_string_lossy().to_string();
-            let cleanup = name.strip_suffix(".input").is_some_and(is_hash)
+            let cleanup = name.strip_suffix(".chunks").is_some_and(|id| {
+                is_hash(id) && !records.get(id).is_some_and(|r| r.status == JobStatus::CompletedUnverified)
+            }) || name.strip_suffix(".input").is_some_and(is_hash)
                 || name.strip_suffix(".output").is_some_and(|id| {
                     is_hash(id)
                         && !records
@@ -441,6 +453,7 @@ impl JobManager {
             status: JobStatus::Queued,
             result_sha256: None,
             result_bytes: None,
+            result_chunk_index_sha256: None,
             error: None,
             submitted_unix: unix_time(),
             finished_unix: None,
@@ -463,6 +476,7 @@ impl JobManager {
                     let _ = fs::remove_file(self.root.join(format!("{old_id}.json")));
                     let _ = fs::remove_file(self.root.join(format!("{old_id}.input")));
                     let _ = fs::remove_file(self.root.join(format!("{old_id}.output")));
+                    let _ = fs::remove_file(self.root.join(format!("{old_id}.chunks")));
                 } else {
                     return Err("job record retention cap reached".into());
                 }
@@ -483,6 +497,7 @@ impl JobManager {
         status: JobStatus,
         digest: Option<String>,
         length: Option<u64>,
+        index_sha256: Option<String>,
         error: Option<String>,
     ) {
         let mut records = self.records.lock().await;
@@ -490,6 +505,7 @@ impl JobManager {
             record.status = status.clone();
             record.result_sha256 = digest;
             record.result_bytes = length;
+            record.result_chunk_index_sha256 = index_sha256;
             record.error = error;
             if !matches!(status, JobStatus::Queued | JobStatus::Running) {
                 record.finished_unix = Some(unix_time());
@@ -564,7 +580,8 @@ impl JobManager {
         };
         let input_path = self.root.join(format!("{id}.input"));
         let output_path = self.root.join(format!("{id}.output"));
-        let result: Result<(String, u64), String> = async {
+        let index_path = self.root.join(format!("{id}.chunks"));
+        let result: Result<(String, u64, String), String> = async {
             let _memory = self
                 .memory
                 .clone()
@@ -579,7 +596,7 @@ impl JobManager {
                 .map_err(|err| err.to_string())?;
             self.check_chain(&record).await?;
             let (_, data) = self.artifacts.get(&record.input_artifact_id).await?;
-            self.set_status(&id, JobStatus::Running, None, None, None)
+            self.set_status(&id, JobStatus::Running, None, None, None, None)
                 .await;
 
             let worker = self
@@ -618,26 +635,31 @@ impl JobManager {
                 return Err(format!("approved worker exited with status {status}"));
             }
             self.check_chain(&record).await?;
-            checked_result_digest(&output_path)
+            let (digest, size, index) = checked_result_digest(&output_path)?;
+            let index_digest = hash_bytes(&index);
+            write_chunk_index(&self.root, &id, &index)?;
+            Ok((digest, size, index_digest))
         }
         .await;
         let _ = fs::remove_file(&input_path);
         if result.is_err() {
             let _ = fs::remove_file(&output_path);
+            let _ = fs::remove_file(&index_path);
         }
         match result {
-            Ok((digest, size)) => {
+            Ok((digest, size, index_digest)) => {
                 self.set_status(
                     &id,
                     JobStatus::CompletedUnverified,
                     Some(digest),
                     Some(size),
+                    Some(index_digest),
                     None,
                 )
                 .await;
             }
             Err(err) => {
-                self.set_status(&id, JobStatus::Failed, None, None, Some(err))
+                self.set_status(&id, JobStatus::Failed, None, None, None, Some(err))
                     .await;
             }
         }
@@ -719,6 +741,7 @@ mod tests {
             status: JobStatus::Running,
             result_sha256: None,
             result_bytes: None,
+            result_chunk_index_sha256: None,
             error: None,
             submitted_unix: 1,
             finished_unix: None,
