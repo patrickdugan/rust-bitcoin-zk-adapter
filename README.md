@@ -23,9 +23,9 @@ cargo clippy --all-targets -- -D warnings
 
 ## Inspect a transaction
 
-\`\`\`bash
+```bash
 cargo run --bin inspect_tx -- fixtures/mainnet/2033435de7ce307341231e818ed937cd3a5e8597381fd83a7e5b0234f61b38d3.hex
-\`\`\`
+```
 
 This offline tool reads serialized Bitcoin transaction hex. It makes no network calls or claims about canonical-chain membership. See [fixture provenance](docs/FIXTURE_PROVENANCE.md). The TL parser is an experimental strict mode, not historical TradeLayer consensus equivalence.
 

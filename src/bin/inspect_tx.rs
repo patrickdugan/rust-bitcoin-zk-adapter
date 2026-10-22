@@ -14,7 +14,9 @@ fn parse_hex(source: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         return Err("odd number of hex digits".into());
     }
     hex.as_bytes()
-        .as_chunks::<2>().0.iter()
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
             let ascii = std::str::from_utf8(chunk)?;
             Ok(u8::from_str_radix(ascii, 16)?)
