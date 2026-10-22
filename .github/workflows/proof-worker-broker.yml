@@ -1,0 +1,28 @@
+name: Isolated proof worker broker
+on:
+  push:
+    paths:
+      - 'services/proof-worker-broker/**'
+      - 'integrations/worker-broker-protocol/**'
+      - '.github/workflows/proof-worker-broker.yml'
+  pull_request:
+    paths:
+      - 'services/proof-worker-broker/**'
+      - 'integrations/worker-broker-protocol/**'
+      - '.github/workflows/proof-worker-broker.yml'
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path integrations/worker-broker-protocol/Cargo.toml -- --check
+      - run: cargo test --manifest-path integrations/worker-broker-protocol/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path integrations/worker-broker-protocol/Cargo.toml --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path services/proof-worker-broker/Cargo.toml -- --check
+      - run: cargo test --manifest-path services/proof-worker-broker/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path services/proof-worker-broker/Cargo.toml --all-targets -- -D warnings
