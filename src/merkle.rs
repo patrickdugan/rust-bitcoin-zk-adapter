@@ -85,5 +85,11 @@ pub fn verify_tx_in_header(
     transaction_count: u32,
     siblings: &[TxMerkleNode],
 ) -> Result<(), MerkleError> {
-    verify_tx_merkle_root(txid, position, transaction_count, siblings, header.merkle_root)
+    verify_tx_merkle_root(
+        txid,
+        position,
+        transaction_count,
+        siblings,
+        header.merkle_root,
+    )
 }
