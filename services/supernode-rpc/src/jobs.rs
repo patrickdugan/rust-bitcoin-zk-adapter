@@ -558,12 +558,29 @@ impl JobManager {
         if !is_hash(id) {
             return Err("invalid job identifier".into());
         }
-        self.records
+        let record = self
+            .records
             .lock()
             .await
             .get(id)
             .cloned()
-            .ok_or("job identifier not found".into())
+            .ok_or("job identifier not found".to_owned())?;
+        // Persisted status data must agree with the typed Raito proof claim
+        // before any RPC consumer sees a verified result.
+        if record.status == JobStatus::VerifiedRaito
+            || (record.status == JobStatus::OutputEvicted && record.verified_raito.is_some())
+        {
+            let receipt = record
+                .verified_raito
+                .as_ref()
+                .ok_or("verified Raito job has no typed receipt")?;
+            let digest = record
+                .result_sha256
+                .as_deref()
+                .ok_or("verified Raito job has no proof digest")?;
+            receipt.validate(&record, digest)?;
+        }
+        Ok(record)
     }
 
     async fn check_chain(&self, record: &JobRecord) -> Result<(), String> {
