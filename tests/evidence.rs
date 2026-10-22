@@ -91,3 +91,59 @@ fn rejects_invalid_transaction_bytes() {
     assert!(decode_hex_exact("zz", 10).is_err());
     assert!(decode_hex_exact("ab", 0).is_err());
 }
+
+
+#[test]
+fn evidence_observes_non_tradelayer_mainnet_transaction_only_as_synthetic() {
+    let observation =
+        rust_bitcoin_zk_adapter::evidence::observe_litecoin_testnet_claim(&synthetic_claim())
+            .unwrap();
+    assert_eq!(observation.outputs.len(), 1);
+    assert_eq!(observation.outputs[0].vout, 1);
+    assert_eq!(
+        observation.outputs[0].strict,
+        rust_bitcoin_zk_adapter::replay::StrictOutcome::Ignored
+    );
+    assert_eq!(
+        observation.outputs[0].legacy,
+        rust_bitcoin_zk_adapter::replay::LegacyOutcome::Ignored
+    );
+}
+
+#[test]
+fn synthetic_trade_layer_output_is_bound_to_merkle_inclusion() {
+    use rust_bitcoin_zk_adapter::evidence::observe_litecoin_testnet_claim;
+    use rust_bitcoin_zk_adapter::replay::{LegacyOutcome, StrictOutcome};
+    let mut claim = synthetic_claim();
+    let raw = decode_hex_exact(&claim.raw_transaction_hex, 4_000_000).unwrap();
+    let mut tx: Transaction = deserialize(&raw).unwrap();
+    tx.output[1].script_pubkey =
+        bitcoin::ScriptBuf::from_bytes(vec![0x6a, 5, b't', b'l', b'2', b'0', b'z']);
+    claim.raw_transaction_hex = bitcoin::consensus::encode::serialize_hex(&tx);
+    claim.txid = tx.compute_txid().to_string();
+
+    let header_bytes = decode_hex_exact(&claim.block_header_hex, 80).unwrap();
+    let mut header: Header = deserialize(&header_bytes).unwrap();
+    header.merkle_root = TxMerkleNode::from_byte_array(tx.compute_txid().to_byte_array());
+    claim.block_hash = header.block_hash().to_string();
+    claim.block_header_hex = bitcoin::consensus::encode::serialize_hex(&header);
+
+    let output = observe_litecoin_testnet_claim(&claim).unwrap().outputs.remove(0);
+    assert_eq!(
+        output.strict,
+        StrictOutcome::Envelope {
+            tx_type: 2,
+            body: "0z".to_owned(),
+        }
+    );
+    assert_eq!(
+        output.legacy,
+        LegacyOutcome::Payload {
+            payload: "20z".to_owned(),
+        }
+    );
+
+    // The transaction cannot retain its old inclusion evidence after mutation.
+    claim.txid = "00".repeat(32);
+    assert!(observe_litecoin_testnet_claim(&claim).is_err());
+}

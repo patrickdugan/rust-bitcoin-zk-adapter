@@ -62,6 +62,9 @@ transaction to a declared txid, the Merkle root in a supplied block header,
 the header's displayed block hash, and Litecoin Core's specific testnet
 genesis hash. It reports OP_RETURN output indices in transaction order.
 
+The verifier also reports strict and historical JavaScript decoding outcomes
+for each OP_RETURN output, after verifying the transaction's Merkle path.
+
 The cryptographic checks establish **internal consistency against supplied
 inputs**. A trusted Litecoin Core node is required to establish that the
 header and block height belong to its validated canonical testnet history.

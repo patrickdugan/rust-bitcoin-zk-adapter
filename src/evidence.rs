@@ -153,3 +153,61 @@ pub fn verify_litecoin_testnet_claim(claim: &InclusionClaim) -> Result<VerifiedI
         op_return_outputs,
     })
 }
+
+
+/// Read-only parser observation derived from a self-consistent inclusion claim.
+/// Parsing outcomes do not establish overlay consensus validity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputObservation {
+    pub vout: u32,
+    pub strict: crate::replay::StrictOutcome,
+    pub legacy: crate::replay::LegacyOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InclusionObservation {
+    pub binding: VerifiedInclusion,
+    pub outputs: Vec<OutputObservation>,
+}
+
+/// Verify txid, block header and Merkle path before examining OP_RETURN data.
+/// Both parser interpretations are recorded, including malformed strict scripts.
+pub fn observe_litecoin_testnet_claim(
+    claim: &InclusionClaim,
+) -> Result<InclusionObservation, String> {
+    let binding = verify_litecoin_testnet_claim(claim)?;
+    let raw = decode_hex_exact(&claim.raw_transaction_hex, MAX_TRANSACTION_BYTES)?;
+    let tx: Transaction =
+        deserialize(&raw).map_err(|error| format!("transaction decode: {error}"))?;
+    let outputs = tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.script_pubkey.is_op_return())
+        .map(|(vout, output)| {
+            let script = output.script_pubkey.as_bytes();
+            let strict = match crate::op_return::decode_op_return(script)
+                .and_then(|data| crate::op_return::decode_tradelayer_envelope(&data))
+            {
+                Ok(Some(env)) => crate::replay::StrictOutcome::Envelope {
+                    tx_type: env.tx_type,
+                    body: env.body,
+                },
+                Ok(None) => crate::replay::StrictOutcome::Ignored,
+                Err(err) => crate::replay::StrictOutcome::Error {
+                    code: format!("{err:?}"),
+                },
+            };
+            let legacy = match crate::compat::legacy_txindex_payload(script) {
+                Some(payload) => crate::replay::LegacyOutcome::Payload { payload },
+                None => crate::replay::LegacyOutcome::Ignored,
+            };
+            OutputObservation {
+                vout: vout as u32,
+                strict,
+                legacy,
+            }
+        })
+        .collect();
+    Ok(InclusionObservation { binding, outputs })
+}
