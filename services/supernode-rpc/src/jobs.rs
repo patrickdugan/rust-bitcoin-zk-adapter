@@ -1702,6 +1702,7 @@ mod tests {
             1,
         )
         .unwrap();
+        assert!(tampered_load.status(&started.id).await.is_err());
         assert!(tampered_load.verified_receipt(&started.id).await.is_err());
         assert!(tampered_load
             .result_chunk(&started.id, 0, 20)
