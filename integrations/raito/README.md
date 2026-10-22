@@ -31,3 +31,22 @@ result is limited to the upstream proof statement and configured work bound.
 build check before claiming compatibility with the pinned upstream revision.
 
 Compatibility CI runs for changes to this integration directory.
+
+
+## Machine-mode result verifier
+
+After building the pinned integration, use the executable with:
+
+```sh
+raito-verify --gateway PROOF_FILE EXPECTED_TXID BLOCKHASH BLOCKHEIGHT \
+  POLICY_SHA256 RECEIPT_JSON
+```
+
+The policy digest is SHA-256 of `serde_json::to_vec(&VerifierConfig::default())`
+under the pinned upstream revision. Machine mode rejects any other policy,
+runs `verify_proof(..., dev=false)`, checks the proof's transaction/block
+against the requested job, and writes a structured receipt with the hash of
+the exact compressed bytes that were decoded. The gateway verifies those
+fields against the persistent job record and the worker's own SHA-256. Its
+separate executable pin prevents accidental substitution with a mock or
+different upstream verifier.

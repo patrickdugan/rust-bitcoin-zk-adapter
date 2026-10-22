@@ -4,6 +4,7 @@ use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
 };
 use rust_bitcoin_supernode_rpc::jobs::{JobManager, WorkerPrograms};
+use rust_bitcoin_supernode_rpc::verification::RaitoVerifier;
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use std::sync::Arc;
 use std::{env, error::Error, net::SocketAddr};
@@ -73,12 +74,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             raito: env::var("SUPERNODE_RAITO_PROVER").ok().map(Into::into),
             shinigami: env::var("SUPERNODE_SHINIGAMI_PROVER").ok().map(Into::into),
         };
-        let manager = JobManager::new(
+        let verifier = match env::var("SUPERNODE_RAITO_VERIFIER") {
+            Ok(executable) => Some(RaitoVerifier {
+                executable: executable.into(),
+                binary_sha256: env::var("SUPERNODE_RAITO_VERIFIER_SHA256")?,
+            }),
+            Err(_) => None,
+        };
+        let manager = JobManager::new_with_verifier(
             path.into(),
             store,
             core.clone(),
             tracker.clone(),
             backend,
+            verifier,
             budget,
             workers,
         )?;

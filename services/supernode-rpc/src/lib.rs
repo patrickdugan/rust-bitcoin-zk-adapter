@@ -20,6 +20,7 @@ use tokio::sync::Semaphore;
 pub mod cache;
 pub mod chain;
 pub mod jobs;
+pub mod verification;
 
 pub const MAX_RPC_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RPC_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
@@ -355,7 +356,10 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
             "proof_jobs":match &gateway.jobs { Some(manager)=>manager.capabilities(), None=>json!({"queue_enabled":false}) },
             "zmq_sequence_tracking":gateway.chain.snapshot().await["sequence_zmq_enabled"],
             "bitcoin_merkle_proof_checked":true,
-            "raito": {"proof_verifier_connected":false, "job_queue_connected":false},
+            "raito": {
+                "proof_verifier_connected":gateway.jobs.as_ref().is_some_and(|m| m.raito_verifier_configured()),
+                "job_queue_connected":gateway.jobs.as_ref().is_some_and(|m| m.raito_worker_configured())
+            },
             "shinigami": {"script_prover_connected":false},
             "ark": {"vtxo_index_connected":false},
             "limits": {"inflight_requests":MAX_INFLIGHT_REQUESTS,
@@ -370,6 +374,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
         "zk.artifact.get" => get_artifact(gateway, &params).await,
         "zk.proof.submit" => submit_proof_job(gateway, &params).await,
         "zk.proof.status" => proof_job_status(gateway, &params).await,
+        "zk.proof.receipt" => proof_job_receipt(gateway, &params).await,
         "zk.proof.get" => proof_job_get(gateway, &params).await,
         "zk.chain.refresh" => gateway
             .chain
@@ -766,13 +771,13 @@ async fn submit_proof_job(gateway: &Gateway, params: &Value) -> Result<Value, Rp
     let args = params.as_array().ok_or_else(|| {
         RpcError::new(
             -32602,
-            "expected [backend,artifact_id,memory_mib,policy_sha256]",
+            "expected [backend,artifact_id,memory_mib,policy_sha256,optional_expected_txid]",
         )
     })?;
-    if args.len() != 4 {
+    if !(4..=5).contains(&args.len()) {
         return Err(RpcError::new(
             -32602,
-            "expected [backend,artifact_id,memory_mib,policy_sha256]",
+            "expected [backend,artifact_id,memory_mib,policy_sha256,optional_expected_txid]",
         ));
     }
     let backend = args[0]
@@ -788,8 +793,11 @@ async fn submit_proof_job(gateway: &Gateway, params: &Value) -> Result<Value, Rp
     let policy = args[3]
         .as_str()
         .ok_or_else(|| RpcError::new(-32602, "invalid policy hash"))?;
+    let expected_txid = args.get(4)
+        .map(|v| v.as_str().ok_or_else(|| RpcError::new(-32602, "invalid expected TXID")))
+        .transpose()?;
     let record = manager
-        .submit(backend, artifact, memory, policy)
+        .submit_with_txid(backend, artifact, memory, policy, expected_txid)
         .await
         .map_err(|err| RpcError::new(-32040, err))?;
     Ok(json!({"job":record,"note":"Worker completion is not proof verification"}))
@@ -819,6 +827,20 @@ async fn proof_job_get(gateway: &Gateway, params: &Value) -> Result<Value, RpcEr
         .result_chunk(id, offset, length)
         .await
         .map_err(|error| RpcError::new(-32042, error))
+}
+
+async fn proof_job_receipt(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
+    let manager = gateway.jobs.as_ref()
+        .ok_or_else(|| RpcError::new(-32601, "proof job dispatcher not configured"))?;
+    let args = params.as_array()
+        .ok_or_else(|| RpcError::new(-32602, "expected [job_id]"))?;
+    if args.len() != 1 {
+        return Err(RpcError::new(-32602, "expected [job_id]"));
+    }
+    let id = args[0].as_str()
+        .ok_or_else(|| RpcError::new(-32602, "invalid job ID"))?;
+    manager.verified_receipt(id).await
+        .map_err(|error| RpcError::new(-32043, error))
 }
 
 async fn proof_job_status(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {

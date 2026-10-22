@@ -195,3 +195,31 @@ small RPC response. Clients should still recompute the original whole-output
 SHA-256 after assembling all chunks. The chunk index authenticates bytes
 against the locally recorded worker output, **not** the proof statement.
 
+
+
+## Raito verified result publication
+
+The optional `SUPERNODE_RAITO_VERIFIER` names an absolute, separately built
+`integrations/raito` verifier binary. The operator must also set
+`SUPERNODE_RAITO_VERIFIER_SHA256` to the lowercase SHA-256 of **that exact
+executable**. The gateway checks the pin before every invocation. Worker
+output can become a typed `verified_raito` job only after that executable
+checks the Raito compressed SPV proof with `dev=false`, its default policy
+matches the supplied `policy_sha256`, the proven transaction matches the
+caller-provided TXID, and the block matches Bitcoin Core at verification time.
+
+`zk.proof.submit` accepts a fifth optional argument, `expected_txid`, for
+Raito jobs. Without it, or without an operator-configured verifier, completed
+output stays `completed_unverified`. The policy hash is the SHA-256 of the
+canonical JSON serialization of `VerifierConfig::default()` from the pinned
+Raito integration. Arbitrary hashes supplied by an RPC client cannot authorize
+verification. `zk.proof.receipt [job_id]` serves the typed result only after
+a fresh active-chain check. `zk.proof.get` includes the checked Raito statement
+on verified chunks. Verification failures preserve the unverified output for
+inspection within retention limits. Quota eviction retains the verified
+statement and original proof digest, with `output_retained:false`.
+
+Proof verification is still a separate process and uses the same admission
+reservation mechanism as proving. Operators must impose OS/cgroup memory
+limits on both binaries. Raito's recursive proof validates its configured
+statement; it cannot independently select Bitcoin's economic canonical chain.

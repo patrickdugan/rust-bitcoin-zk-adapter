@@ -5,6 +5,7 @@
 //! limit. Configure cgroups/containers around approved prover binaries.
 
 use bitcoin::hashes::{sha256, Hash, HashEngine};
+use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -22,7 +23,9 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{cache::ArtifactStore, chain::ChainTracker, CoreRpc};
+use crate::{
+    cache::ArtifactStore, chain::ChainTracker, verification::{RaitoVerifiedReceipt, RaitoVerifier}, CoreRpc,
+};
 
 pub const MAX_PENDING_JOBS: usize = 16;
 pub const MAX_JOB_HISTORY: usize = 128;
@@ -197,7 +200,7 @@ fn prune_result_files(
     let mut retained = Vec::new();
     let mut total = 0u64;
     for (id, record) in records.iter_mut() {
-        if record.status != JobStatus::CompletedUnverified {
+        if !matches!(record.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito) {
             continue;
         }
         let path = root.join(format!("{id}.output"));
@@ -259,6 +262,7 @@ pub enum JobStatus {
     Queued,
     Running,
     CompletedUnverified,
+    VerifiedRaito,
     OutputEvicted,
     Failed,
     Interrupted,
@@ -276,12 +280,16 @@ pub struct JobRecord {
     pub chain_epoch: u64,
     pub policy_sha256: String,
     pub estimated_memory_mib: u32,
+    #[serde(default)]
+    pub expected_txid: Option<String>,
     pub status: JobStatus,
     pub result_sha256: Option<String>,
     #[serde(default)]
     pub result_bytes: Option<u64>,
     #[serde(default)]
     pub result_chunk_index_sha256: Option<String>,
+    #[serde(default)]
+    pub verified_raito: Option<RaitoVerifiedReceipt>,
     pub error: Option<String>,
     pub submitted_unix: u64,
     pub finished_unix: Option<u64>,
@@ -311,6 +319,7 @@ pub struct JobManager {
     core: CoreRpc,
     chain: Arc<ChainTracker>,
     workers: WorkerPrograms,
+    raito_verifier: Option<RaitoVerifier>,
     memory: Arc<Semaphore>,
     slots: Arc<Semaphore>,
     queue_slots: Arc<Semaphore>,
@@ -329,6 +338,24 @@ impl JobManager {
         memory_budget_mib: u32,
         worker_count: usize,
     ) -> Result<Arc<Self>, String> {
+        Self::new_with_verifier(
+            root, artifacts, core, chain, workers, None, memory_budget_mib, worker_count,
+        )
+    }
+
+    pub fn new_with_verifier(
+        root: PathBuf,
+        artifacts: Arc<ArtifactStore>,
+        core: CoreRpc,
+        chain: Arc<ChainTracker>,
+        workers: WorkerPrograms,
+        raito_verifier: Option<RaitoVerifier>,
+        memory_budget_mib: u32,
+        worker_count: usize,
+    ) -> Result<Arc<Self>, String> {
+        if let Some(ref verifier) = raito_verifier {
+            verifier.validate()?;
+        }
         if memory_budget_mib == 0
             || memory_budget_mib > MAX_ESTIMATED_MEMORY_MIB
             || !(1..=4).contains(&worker_count)
@@ -401,13 +428,13 @@ impl JobManager {
                 is_hash(id)
                     && !records
                         .get(id)
-                        .is_some_and(|r| r.status == JobStatus::CompletedUnverified)
+                        .is_some_and(|r| matches!(r.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito))
             }) || name.strip_suffix(".input").is_some_and(is_hash)
                 || name.strip_suffix(".output").is_some_and(|id| {
                     is_hash(id)
                         && !records
                             .get(id)
-                            .is_some_and(|record| record.status == JobStatus::CompletedUnverified)
+                            .is_some_and(|record| matches!(record.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito))
                 });
             if cleanup && entry.file_type().map_err(|err| err.to_string())?.is_file() {
                 let _ = fs::remove_file(entry.path());
@@ -420,6 +447,7 @@ impl JobManager {
             core,
             chain,
             workers,
+            raito_verifier,
             memory: Arc::new(Semaphore::new(memory_budget_mib as usize)),
             slots: Arc::new(Semaphore::new(worker_count)),
             queue_slots: Arc::new(Semaphore::new(MAX_PENDING_JOBS)),
@@ -433,6 +461,7 @@ impl JobManager {
         json!({
             "queue_enabled":true,
             "raito_worker_configured":self.workers.enabled(&JobKind::Raito),
+            "raito_verifier_configured":self.raito_verifier.is_some(),
             "shinigami_worker_configured":self.workers.enabled(&JobKind::Shinigami),
             "max_pending":MAX_PENDING_JOBS,
             "max_worker_count":self.worker_count,
@@ -443,6 +472,14 @@ impl JobManager {
             "max_retained_result_bytes":MAX_RETAINED_RESULT_BYTES,
             "results_are_cryptographically_verified":false
         })
+    }
+
+    pub fn raito_verifier_configured(&self) -> bool {
+        self.raito_verifier.is_some()
+    }
+
+    pub fn raito_worker_configured(&self) -> bool {
+        self.workers.enabled(&JobKind::Raito)
     }
 
     pub async fn status(&self, id: &str) -> Result<JobRecord, String> {
@@ -486,7 +523,25 @@ impl JobManager {
         memory_mib: u32,
         policy_sha256: &str,
     ) -> Result<JobRecord, String> {
+        self.submit_with_txid(backend, artifact_id, memory_mib, policy_sha256, None).await
+    }
+
+    pub async fn submit_with_txid(
+        self: &Arc<Self>,
+        backend: &str,
+        artifact_id: &str,
+        memory_mib: u32,
+        policy_sha256: &str,
+        expected_txid: Option<&str>,
+    ) -> Result<JobRecord, String> {
         let kind = JobKind::from_name(backend)?;
+        if expected_txid.is_some() && kind != JobKind::Raito {
+            return Err("only Raito submissions may specify an expected TXID".into());
+        }
+        let expected_txid = expected_txid
+            .map(|txid| bitcoin::Txid::from_str(txid).map(|parsed| parsed.to_string()))
+            .transpose()
+            .map_err(|_| "invalid expected Bitcoin TXID")?;
         if !self.workers.enabled(&kind) {
             return Err("requested proving worker is not configured".into());
         }
@@ -521,10 +576,12 @@ impl JobManager {
             chain_epoch: meta.chain_epoch,
             policy_sha256: policy_sha256.to_owned(),
             estimated_memory_mib: memory_mib,
+            expected_txid,
             status: JobStatus::Queued,
             result_sha256: None,
             result_bytes: None,
             result_chunk_index_sha256: None,
+            verified_raito: None,
             error: None,
             submitted_unix: unix_time(),
             finished_unix: None,
@@ -577,6 +634,7 @@ impl JobManager {
             record.result_sha256 = digest;
             record.result_bytes = length;
             record.result_chunk_index_sha256 = index_sha256;
+            record.verified_raito = None;
             record.error = error;
             if !matches!(status, JobStatus::Queued | JobStatus::Running) {
                 record.finished_unix = Some(unix_time());
@@ -594,8 +652,45 @@ impl JobManager {
         }
     }
 
-    /// Return small, hash-checked chunks, never the entire (possibly large)
-    /// unverified STARK output. Every read rechecks active-chain binding.
+    /// Publish a typed receipt only when it comes from the operator-pinned
+    /// external Raito verifier and is bound to the recorded worker bytes.
+    async fn publish_raito_verified(
+        &self,
+        id: &str,
+        report: RaitoVerifiedReceipt,
+    ) -> Result<(), String> {
+        let mut state = self.records.lock().await;
+        let record = state.get(id).ok_or("verified job missing")?;
+        if record.status != JobStatus::CompletedUnverified {
+            return Err("job output was evicted before verification completed".into());
+        }
+        let mut updated = record.clone();
+        updated.status = JobStatus::VerifiedRaito;
+        updated.error = None;
+        updated.verified_raito = Some(report);
+        atomic_json(&self.root, &updated)?;
+        state.insert(id.to_owned(), updated);
+        prune_result_files(&self.root, &mut state, MAX_RETAINED_RESULT_BYTES)?;
+        Ok(())
+    }
+
+    pub async fn verified_receipt(&self, id: &str) -> Result<Value, String> {
+        let record = self.status(id).await?;
+        let receipt = record.verified_raito.as_ref().ok_or("Raito proof has no verified receipt")?;
+        self.check_chain(&record).await?;
+        Ok(json!({
+            "job_id":record.id,
+            "proof_verified":true,
+            "verified_statement":receipt,
+            "active_chain_at_lookup":true,
+            "output_retained":record.status == JobStatus::VerifiedRaito,
+            "result_sha256":record.result_sha256
+        }))
+    }
+
+    /// Return small, hash-checked chunks. Cryptographic verification is
+    /// asserted only for an accepted typed Raito receipt. Chain binding is
+    /// rechecked on each retrieval.
     pub async fn result_chunk(
         &self,
         id: &str,
@@ -606,7 +701,7 @@ impl JobManager {
             return Err("chunk size exceeds bounded RPC result limit".into());
         }
         let record = self.status(id).await?;
-        if record.status != JobStatus::CompletedUnverified {
+        if !matches!(record.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito) {
             return Err("job does not have a retained completed result".into());
         }
         self.check_chain(&record).await?;
@@ -655,7 +750,8 @@ impl JobManager {
             "data_hex":hex::encode(chunk),
             "next_offset":offset + count as u64,
             "complete":offset + count as u64 == length,
-            "proof_verified":false
+            "proof_verified":record.status == JobStatus::VerifiedRaito && record.verified_raito.is_some(),
+            "verified_statement":record.verified_raito
         }))
     }
 
@@ -742,6 +838,38 @@ impl JobManager {
                     None,
                 )
                 .await;
+                if record.kind == JobKind::Raito {
+                    if let (Some(verifier), Some(_)) =
+                        (&self.raito_verifier, record.expected_txid.as_ref())
+                    {
+                        let verification = async {
+                            let _memory = self.memory.clone()
+                                .acquire_many_owned(record.estimated_memory_mib)
+                                .await.map_err(|err| err.to_string())?;
+                            let _slot = self.slots.clone()
+                                .acquire_owned().await.map_err(|err| err.to_string())?;
+                            self.check_chain(&record).await?;
+                            let report = verifier.verify(&self.root, &record, &digest).await?;
+                            let (actual, actual_size, _) = checked_result_digest(&output_path)?;
+                            if actual != digest || actual_size != size {
+                                return Err("proof output changed during Raito verification".into());
+                            }
+                            self.check_chain(&record).await?;
+                            self.publish_raito_verified(&id, report).await
+                        }.await;
+                        if let Err(err) = verification {
+                            // The raw proof remains available for inspection,
+                            // always labeled unverified. Never trust prover bytes.
+                            let mut state = self.records.lock().await;
+                            if let Some(current) = state.get_mut(&id) {
+                                current.error = Some(format!("Raito verification: {err}"));
+                                if let Err(e) = atomic_json(&self.root, current) {
+                                    eprintln!("Could not persist verification error: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Err(err) => {
                 self.set_status(&id, JobStatus::Failed, None, None, None, Some(err))
@@ -823,10 +951,12 @@ mod tests {
             chain_epoch: 0,
             policy_sha256: "12".repeat(32),
             estimated_memory_mib: 16,
+            expected_txid: None,
             status: JobStatus::Running,
             result_sha256: None,
             result_bytes: None,
             result_chunk_index_sha256: None,
+            verified_raito: None,
             error: None,
             submitted_unix: 1,
             finished_unix: None,
@@ -925,10 +1055,12 @@ mod tests {
                 chain_epoch: 0,
                 policy_sha256: "dd".repeat(32),
                 estimated_memory_mib: 1,
+                expected_txid: None,
                 status: JobStatus::CompletedUnverified,
                 result_sha256: Some(hash_bytes(&bytes)),
                 result_bytes: Some(bytes.len() as u64),
                 result_chunk_index_sha256: None,
+                verified_raito: None,
                 error: None,
                 submitted_unix: index as u64,
                 finished_unix: Some(100),
