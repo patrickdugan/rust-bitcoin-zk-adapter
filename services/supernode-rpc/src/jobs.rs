@@ -5,9 +5,9 @@
 //! limit. Configure cgroups/containers around approved prover binaries.
 
 use bitcoin::hashes::{sha256, Hash, HashEngine};
-use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::str::FromStr;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -24,7 +24,10 @@ use tokio::{
 };
 
 use crate::{
-    cache::ArtifactStore, chain::ChainTracker, verification::{RaitoVerifiedReceipt, RaitoVerifier}, CoreRpc,
+    cache::ArtifactStore,
+    chain::ChainTracker,
+    verification::{RaitoVerifiedReceipt, RaitoVerifier},
+    CoreRpc,
 };
 
 pub const MAX_PENDING_JOBS: usize = 16;
@@ -200,7 +203,10 @@ fn prune_result_files(
     let mut retained = Vec::new();
     let mut total = 0u64;
     for (id, record) in records.iter_mut() {
-        if !matches!(record.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito) {
+        if !matches!(
+            record.status,
+            JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+        ) {
             continue;
         }
         let path = root.join(format!("{id}.output"));
@@ -339,7 +345,14 @@ impl JobManager {
         worker_count: usize,
     ) -> Result<Arc<Self>, String> {
         Self::new_with_verifier(
-            root, artifacts, core, chain, workers, None, memory_budget_mib, worker_count,
+            root,
+            artifacts,
+            core,
+            chain,
+            workers,
+            None,
+            memory_budget_mib,
+            worker_count,
         )
     }
 
@@ -426,15 +439,21 @@ impl JobManager {
             let name = entry.file_name().to_string_lossy().to_string();
             let cleanup = name.strip_suffix(".chunks").is_some_and(|id| {
                 is_hash(id)
-                    && !records
-                        .get(id)
-                        .is_some_and(|r| matches!(r.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito))
+                    && !records.get(id).is_some_and(|r| {
+                        matches!(
+                            r.status,
+                            JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+                        )
+                    })
             }) || name.strip_suffix(".input").is_some_and(is_hash)
                 || name.strip_suffix(".output").is_some_and(|id| {
                     is_hash(id)
-                        && !records
-                            .get(id)
-                            .is_some_and(|record| matches!(record.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito))
+                        && !records.get(id).is_some_and(|record| {
+                            matches!(
+                                record.status,
+                                JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+                            )
+                        })
                 });
             if cleanup && entry.file_type().map_err(|err| err.to_string())?.is_file() {
                 let _ = fs::remove_file(entry.path());
@@ -523,7 +542,8 @@ impl JobManager {
         memory_mib: u32,
         policy_sha256: &str,
     ) -> Result<JobRecord, String> {
-        self.submit_with_txid(backend, artifact_id, memory_mib, policy_sha256, None).await
+        self.submit_with_txid(backend, artifact_id, memory_mib, policy_sha256, None)
+            .await
     }
 
     pub async fn submit_with_txid(
@@ -676,7 +696,10 @@ impl JobManager {
 
     pub async fn verified_receipt(&self, id: &str) -> Result<Value, String> {
         let record = self.status(id).await?;
-        let receipt = record.verified_raito.as_ref().ok_or("Raito proof has no verified receipt")?;
+        let receipt = record
+            .verified_raito
+            .as_ref()
+            .ok_or("Raito proof has no verified receipt")?;
         self.check_chain(&record).await?;
         Ok(json!({
             "job_id":record.id,
@@ -701,7 +724,10 @@ impl JobManager {
             return Err("chunk size exceeds bounded RPC result limit".into());
         }
         let record = self.status(id).await?;
-        if !matches!(record.status, JobStatus::CompletedUnverified | JobStatus::VerifiedRaito) {
+        if !matches!(
+            record.status,
+            JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+        ) {
             return Err("job does not have a retained completed result".into());
         }
         self.check_chain(&record).await?;
@@ -843,11 +869,18 @@ impl JobManager {
                         (&self.raito_verifier, record.expected_txid.as_ref())
                     {
                         let verification = async {
-                            let _memory = self.memory.clone()
+                            let _memory = self
+                                .memory
+                                .clone()
                                 .acquire_many_owned(record.estimated_memory_mib)
-                                .await.map_err(|err| err.to_string())?;
-                            let _slot = self.slots.clone()
-                                .acquire_owned().await.map_err(|err| err.to_string())?;
+                                .await
+                                .map_err(|err| err.to_string())?;
+                            let _slot = self
+                                .slots
+                                .clone()
+                                .acquire_owned()
+                                .await
+                                .map_err(|err| err.to_string())?;
                             self.check_chain(&record).await?;
                             let report = verifier.verify(&self.root, &record, &digest).await?;
                             let (actual, actual_size, _) = checked_result_digest(&output_path)?;
@@ -856,7 +889,8 @@ impl JobManager {
                             }
                             self.check_chain(&record).await?;
                             self.publish_raito_verified(&id, report).await
-                        }.await;
+                        }
+                        .await;
                         if let Err(err) = verification {
                             // The raw proof remains available for inspection,
                             // always labeled unverified. Never trust prover bytes.

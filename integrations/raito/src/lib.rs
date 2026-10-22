@@ -63,7 +63,10 @@ fn load_bounded_proof(path: &Path) -> Result<(CompressedSpvProof, String)> {
     let meta = fs::symlink_metadata(path)
         .with_context(|| format!("proof path {} could not be inspected", path.display()))?;
     ensure!(meta.file_type().is_file(), "proof must be a regular file");
-    ensure!(meta.len() <= MAX_COMPRESSED_BYTES, "compressed proof exceeds limit");
+    ensure!(
+        meta.len() <= MAX_COMPRESSED_BYTES,
+        "compressed proof exceeds limit"
+    );
 
     // Hash the same compressed byte buffer that is decompressed and verified.
     // This prevents proof-file replacement between separate hashing and parsing.

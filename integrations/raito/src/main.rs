@@ -5,14 +5,7 @@ use bitcoin::{
 };
 use raito_spv_verify::VerifierConfig;
 use rust_bitcoin_raito_sidecar::verify_raito_proof;
-use std::{
-    env,
-    error::Error,
-    fs::OpenOptions,
-    io::Write,
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{env, error::Error, fs::OpenOptions, io::Write, path::PathBuf, str::FromStr};
 
 const VERIFIER_ID: &str = "raito-spv-verify/48c237ac941d8061a857ecd111d7e81107912556";
 const STATEMENT: &str = "raito_spv_transaction_inclusion_v1";
@@ -54,7 +47,10 @@ async fn gateway(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn 
         "proof_sha256": checked.proof_sha256(),
         "policy_sha256": policy_sha256
     });
-    let mut out = OpenOptions::new().write(true).create_new(true).open(receipt_path)?;
+    let mut out = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(receipt_path)?;
     out.write_all(&serde_json::to_vec(&receipt)?)?;
     out.sync_all()?;
     Ok(())

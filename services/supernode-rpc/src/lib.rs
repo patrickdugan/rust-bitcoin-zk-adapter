@@ -793,8 +793,12 @@ async fn submit_proof_job(gateway: &Gateway, params: &Value) -> Result<Value, Rp
     let policy = args[3]
         .as_str()
         .ok_or_else(|| RpcError::new(-32602, "invalid policy hash"))?;
-    let expected_txid = args.get(4)
-        .map(|v| v.as_str().ok_or_else(|| RpcError::new(-32602, "invalid expected TXID")))
+    let expected_txid = args
+        .get(4)
+        .map(|v| {
+            v.as_str()
+                .ok_or_else(|| RpcError::new(-32602, "invalid expected TXID"))
+        })
         .transpose()?;
     let record = manager
         .submit_with_txid(backend, artifact, memory, policy, expected_txid)
@@ -830,16 +834,22 @@ async fn proof_job_get(gateway: &Gateway, params: &Value) -> Result<Value, RpcEr
 }
 
 async fn proof_job_receipt(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
-    let manager = gateway.jobs.as_ref()
+    let manager = gateway
+        .jobs
+        .as_ref()
         .ok_or_else(|| RpcError::new(-32601, "proof job dispatcher not configured"))?;
-    let args = params.as_array()
+    let args = params
+        .as_array()
         .ok_or_else(|| RpcError::new(-32602, "expected [job_id]"))?;
     if args.len() != 1 {
         return Err(RpcError::new(-32602, "expected [job_id]"));
     }
-    let id = args[0].as_str()
+    let id = args[0]
+        .as_str()
         .ok_or_else(|| RpcError::new(-32602, "invalid job ID"))?;
-    manager.verified_receipt(id).await
+    manager
+        .verified_receipt(id)
+        .await
         .map_err(|error| RpcError::new(-32043, error))
 }
 

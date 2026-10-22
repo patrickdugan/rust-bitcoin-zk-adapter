@@ -104,10 +104,7 @@ impl RaitoVerifier {
                 return Err(format!("Raito verifier rejected proof: {status}"));
             }
             let meta = fs::symlink_metadata(&receipt_path).map_err(|e| e.to_string())?;
-            if !meta.file_type().is_file()
-                || meta.len() == 0
-                || meta.len() > MAX_RECEIPT_BYTES
-            {
+            if !meta.file_type().is_file() || meta.len() == 0 || meta.len() > MAX_RECEIPT_BYTES {
                 return Err("Raito verifier returned unsafe or oversized receipt".into());
             }
             let bytes = fs::read(&receipt_path).map_err(|e| e.to_string())?;
