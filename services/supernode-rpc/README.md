@@ -1,3 +1,17 @@
+
+## Bitcoin Core ZMQ sequence monitoring
+
+Set `BITCOIN_ZMQ_SEQUENCE_URL=tcp://127.0.0.1:28333` and configure Bitcoin Core
+with `zmqpubsequence=tcp://127.0.0.1:28333`. The gateway uses an async Rust
+ZeroMQ subscriber, subscribes exclusively to `sequence`, checks frame shapes
+and transport message counters, and records connect/disconnect and mempool
+notification events.
+
+`zk.chainstate` displays epoch, tip snapshot, transport health, and loss
+counters; `zk.chain.refresh` reconciles against Bitcoin Core. Disconnections,
+malformed messages, and counter gaps mark the local state dirty. TCP subscription
+is restricted to loopback. PUB/SUB messages are not durable or authenticated.
+
 # Bitcoin Supernode RPC v0.1
 
 This is a separate Rust service providing a deliberately restricted

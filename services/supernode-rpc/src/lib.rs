@@ -17,6 +17,7 @@ use reqwest::{redirect, Client, Url};
 use serde_json::{json, Value};
 use std::{str::FromStr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
+pub mod chain;
 
 pub const MAX_RPC_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RPC_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
@@ -137,6 +138,7 @@ pub struct Gateway {
     core: CoreRpc,
     gateway_token: String,
     semaphore: Arc<Semaphore>,
+    chain: Arc<chain::ChainTracker>,
 }
 
 impl Gateway {
@@ -151,7 +153,13 @@ impl Gateway {
             core,
             gateway_token,
             semaphore: Arc::new(Semaphore::new(max_inflight)),
+            chain: Arc::new(chain::ChainTracker::new(false)),
         })
+    }
+
+    pub fn with_chain_tracker(mut self, tracker: Arc<chain::ChainTracker>) -> Self {
+        self.chain = tracker;
+        self
     }
 }
 
@@ -269,7 +277,7 @@ async fn rpc(
         )
             .into_response();
     };
-    let result = execute(&state.core, method, params).await;
+    let result = execute(&state, method, params).await;
     Json(match result {
         Ok(value) => success_reply(id, value),
         Err(error) => error_reply(id, error.code, error.message),
@@ -277,7 +285,8 @@ async fn rpc(
     .into_response()
 }
 
-async fn execute(core: &CoreRpc, method: &str, params: Value) -> Result<Value, RpcError> {
+async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value, RpcError> {
+    let core = &gateway.core;
     match method {
         "zk.capabilities" => Ok(json!({
             "api":"supernode-rpc/0.1",
@@ -285,6 +294,7 @@ async fn execute(core: &CoreRpc, method: &str, params: Value) -> Result<Value, R
             "bitcoin_core_proxy":true,
             "transaction_context":true,
             "bounded_spend_context":true,
+            "zmq_sequence_tracking":gateway.chain.snapshot().await["sequence_zmq_enabled"],
             "bitcoin_merkle_proof_checked":true,
             "raito": {"proof_verifier_connected":false, "job_queue_connected":false},
             "shinigami": {"script_prover_connected":false},
@@ -292,6 +302,9 @@ async fn execute(core: &CoreRpc, method: &str, params: Value) -> Result<Value, R
             "limits": {"inflight_requests":MAX_INFLIGHT_REQUESTS,
                        "rpc_response_bytes":MAX_RPC_RESPONSE_BYTES}
         })),
+        "zk.chainstate" => Ok(gateway.chain.snapshot().await),
+        "zk.chain.refresh" => gateway.chain.reconcile(core).await
+            .map_err(|error| RpcError::new(-32010, error)),
         "zk.nodeprofile" => {
             let (chain, indexes, mempool) = tokio::try_join!(
                 core.call("getblockchaininfo", json!([])),
