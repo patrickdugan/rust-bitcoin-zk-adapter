@@ -79,7 +79,6 @@ fn hash_bytes(bytes: &[u8]) -> String {
     hex::encode(sha256::Hash::hash(bytes).to_byte_array())
 }
 
-
 /// Hash worker output in a fixed 64 KiB buffer. Large proof files never
 /// enter the RPC process's heap as a single allocation.
 fn checked_result_digest(path: &Path) -> Result<(String, u64), String> {
@@ -108,7 +107,10 @@ fn checked_result_digest(path: &Path) -> Result<(String, u64), String> {
     if read_bytes != metadata.len() {
         return Err("worker output changed while being hashed".into());
     }
-    Ok((hex::encode(sha256::Hash::from_engine(sha).to_byte_array()), read_bytes))
+    Ok((
+        hex::encode(sha256::Hash::from_engine(sha).to_byte_array()),
+        read_bytes,
+    ))
 }
 
 /// Bound the total amount of *retained* worker output. An evicted job keeps
@@ -320,9 +322,9 @@ impl JobManager {
             let cleanup = name.strip_suffix(".input").is_some_and(is_hash)
                 || name.strip_suffix(".output").is_some_and(|id| {
                     is_hash(id)
-                        && !records.get(id).is_some_and(|record| {
-                            record.status == JobStatus::CompletedUnverified
-                        })
+                        && !records
+                            .get(id)
+                            .is_some_and(|record| record.status == JobStatus::CompletedUnverified)
                 });
             if cleanup && entry.file_type().map_err(|err| err.to_string())?.is_file() {
                 let _ = fs::remove_file(entry.path());
@@ -497,11 +499,9 @@ impl JobManager {
             }
         }
         if status == JobStatus::CompletedUnverified {
-            if let Err(err) = prune_result_files(
-                &self.root,
-                &mut records,
-                MAX_RETAINED_RESULT_BYTES,
-            ) {
+            if let Err(err) =
+                prune_result_files(&self.root, &mut records, MAX_RETAINED_RESULT_BYTES)
+            {
                 eprintln!("Could not enforce proof output retention quota: {err}");
             }
         }
@@ -526,7 +526,9 @@ impl JobManager {
         let path = self.root.join(format!("{id}.output"));
         let (actual_digest, length) = checked_result_digest(&path)?;
         if record.result_sha256.as_deref() != Some(actual_digest.as_str())
-            || record.result_bytes.is_some_and(|expected| expected != length)
+            || record
+                .result_bytes
+                .is_some_and(|expected| expected != length)
         {
             return Err("retained output failed SHA-256 or size verification".into());
         }
@@ -535,7 +537,8 @@ impl JobManager {
         }
         let count = requested.min((length - offset) as usize);
         let mut file = File::open(&path).map_err(|err| err.to_string())?;
-        file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|err| err.to_string())?;
         let mut chunk = vec![0u8; count];
         file.read_exact(&mut chunk).map_err(|err| err.to_string())?;
         let metadata = file.metadata().map_err(|err| err.to_string())?;
@@ -576,7 +579,8 @@ impl JobManager {
                 .map_err(|err| err.to_string())?;
             self.check_chain(&record).await?;
             let (_, data) = self.artifacts.get(&record.input_artifact_id).await?;
-            self.set_status(&id, JobStatus::Running, None, None, None).await;
+            self.set_status(&id, JobStatus::Running, None, None, None)
+                .await;
 
             let worker = self
                 .workers
