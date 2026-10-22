@@ -1,6 +1,8 @@
 //! Locally bound authenticated Bitcoin Core RPC superset.
+use rust_bitcoin_supernode_rpc::chain::{
+    run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
+};
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
-use rust_bitcoin_supernode_rpc::chain::{run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker};
 use std::sync::Arc;
 use std::{env, error::Error, net::SocketAddr};
 
@@ -39,8 +41,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         validate_local_sequence_endpoint(url)?;
     }
     let tracker = Arc::new(ChainTracker::new(endpoint.is_some()));
-    let gateway = Gateway::new(core.clone(), token, max_inflight)?
-        .with_chain_tracker(tracker.clone());
+    let gateway =
+        Gateway::new(core.clone(), token, max_inflight)?.with_chain_tracker(tracker.clone());
     if let Some(url) = endpoint {
         tokio::spawn(run_sequence_subscriber(url, tracker, core));
     }

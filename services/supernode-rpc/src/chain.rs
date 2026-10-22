@@ -40,16 +40,22 @@ pub fn parse_sequence_frames(frames: &[&[u8]]) -> Result<SequenceEvent, &'static
         (b'C', 33) => SequenceKind::BlockConnected,
         (b'D', 33) => SequenceKind::BlockDisconnected,
         (b'A', 41) => SequenceKind::MempoolAdded(u64::from_le_bytes(
-            body[33..41].try_into().map_err(|_| "short mempool sequence")?,
+            body[33..41]
+                .try_into()
+                .map_err(|_| "short mempool sequence")?,
         )),
         (b'R', 41) => SequenceKind::MempoolRemoved(u64::from_le_bytes(
-            body[33..41].try_into().map_err(|_| "short mempool sequence")?,
+            body[33..41]
+                .try_into()
+                .map_err(|_| "short mempool sequence")?,
         )),
         _ => return Err("unknown sequence event"),
     };
     let hash = hex::encode(body[..32].iter().rev().copied().collect::<Vec<_>>());
     let sequence = u32::from_le_bytes(
-        frames[2].try_into().map_err(|_| "invalid sequence counter")?,
+        frames[2]
+            .try_into()
+            .map_err(|_| "invalid sequence counter")?,
     );
     Ok(SequenceEvent {
         hash,
@@ -243,7 +249,10 @@ pub async fn run_sequence_subscriber(endpoint: String, tracker: Arc<ChainTracker
                     break;
                 }
             };
-            let frames = message.iter().map(|frame| frame.as_ref()).collect::<Vec<_>>();
+            let frames = message
+                .iter()
+                .map(|frame| frame.as_ref())
+                .collect::<Vec<_>>();
             match parse_sequence_frames(&frames) {
                 Ok(event) => {
                     let changed = matches!(
@@ -303,17 +312,21 @@ mod tests {
     async fn gaps_reorgs_and_reconnects_invalidate_snapshot() {
         let tracker = ChainTracker::new(true);
         tracker.set_connected().await;
-        tracker.record(SequenceEvent {
-            hash: "11".repeat(32),
-            sequence: 10,
-            kind: SequenceKind::MempoolAdded(2),
-        }).await;
+        tracker
+            .record(SequenceEvent {
+                hash: "11".repeat(32),
+                sequence: 10,
+                kind: SequenceKind::MempoolAdded(2),
+            })
+            .await;
         assert_eq!(tracker.epoch().await, 0);
-        tracker.record(SequenceEvent {
-            hash: "22".repeat(32),
-            sequence: 12,
-            kind: SequenceKind::BlockDisconnected,
-        }).await;
+        tracker
+            .record(SequenceEvent {
+                hash: "22".repeat(32),
+                sequence: 12,
+                kind: SequenceKind::BlockDisconnected,
+            })
+            .await;
         let status = tracker.snapshot().await;
         assert_eq!(status["missed_or_out_of_order_frames"], 1);
         assert_eq!(status["block_events"], 1);

@@ -303,7 +303,10 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
                        "rpc_response_bytes":MAX_RPC_RESPONSE_BYTES}
         })),
         "zk.chainstate" => Ok(gateway.chain.snapshot().await),
-        "zk.chain.refresh" => gateway.chain.reconcile(core).await
+        "zk.chain.refresh" => gateway
+            .chain
+            .reconcile(core)
+            .await
             .map_err(|error| RpcError::new(-32010, error)),
         "zk.nodeprofile" => {
             let (chain, indexes, mempool) = tokio::try_join!(
