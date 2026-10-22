@@ -1290,6 +1290,171 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_dispatch_mock_raito_receipt_is_typed_and_reorg_checked() {
+        // Synthetic IPC test only: the mock verifier is not Cairo/STWO.
+        // Genuine proof acceptance is tested separately on a live node.
+        use axum::{routing::post, Json, Router};
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::net::TcpListener;
+
+        let directory = tmp("verified-dispatch");
+        fs::create_dir_all(&directory).unwrap();
+        let expected_hash = "ab".repeat(32);
+        let expected_txid = "12".repeat(32);
+        let policy = "ef".repeat(32);
+        let content = b"synthetic-fetched-proof-not-real-stark";
+        let receipt = RaitoVerifiedReceipt {
+            statement: crate::verification::STATEMENT.into(),
+            verifier: crate::verification::VERIFIER_ID.into(),
+            txid: expected_txid.clone(),
+            block_hash: expected_hash.clone(),
+            block_height: 100,
+            proven_tip_height: 105,
+            tx_index: 1,
+            proof_sha256: hash_bytes(content),
+            policy_sha256: policy.clone(),
+        };
+
+        let fetcher = directory.join("mock-fetcher.sh");
+        let fetcher_body = "#!/bin/sh\ninput=\noutput=\ntxid=\nwhile [ \"$#\" -gt 0 ]; do\n case \"$1\" in\n  --input) input=\"$2\"; shift 2;;\n  --output) output=\"$2\"; shift 2;;\n  --expected-txid) txid=\"$2\"; shift 2;;\n  --network|--blockhash|--height|--policy-sha256) shift 2;;\n  *) exit 41;;\n esac\ndone\n[ -s \"$SUPERNODE_RAITO_FETCH_CONFIG\" ] || exit 42\n[ -f \"$input\" ] || exit 43\n[ \"$txid\" = \"EXPECTED_TXID\" ] || exit 44\nprintf 'synthetic-fetched-proof-not-real-stark' > \"$output\"\n".replace("EXPECTED_TXID", &expected_txid);
+        fs::write(&fetcher, fetcher_body).unwrap();
+        fs::set_permissions(&fetcher, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let verifier = directory.join("mock-verifier.sh");
+        let verifier_body = format!(
+            "#!/bin/sh\n[ \"$1\" = --gateway ] || exit 31\n[ \"$3\" = \"{expected_txid}\" ] || exit 32\n[ \"$4\" = \"{expected_hash}\" ] || exit 33\n[ \"$6\" = \"{policy}\" ] || exit 34\ncat > \"$7\" <<'RECEIPT'\n{}\nRECEIPT\n",
+            serde_json::to_string(&receipt).unwrap()
+        );
+        fs::write(&verifier, &verifier_body).unwrap();
+        fs::set_permissions(&verifier, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let active_clone = active.clone();
+        let main_hash = expected_hash.clone();
+        let server = Router::new().route(
+            "/",
+            post(move |Json(body): Json<Value>| {
+                let active = active_clone.clone();
+                let hash = main_hash.clone();
+                async move {
+                    let result = if body["method"] == "getblockhash" {
+                        if active.load(std::sync::atomic::Ordering::SeqCst) {
+                            json!(hash)
+                        } else {
+                            json!("cc".repeat(32))
+                        }
+                    } else if body["method"] == "getblockchaininfo" {
+                        json!({"chain":"main"})
+                    } else {
+                        Value::Null
+                    };
+                    Json(json!({"result":result,"error":null,"id":"supernode"}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rpc_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+
+        let config_path = directory.join("operator-raito-config.json");
+        fs::write(&config_path, b"operator-only-config-path").unwrap();
+        let artifacts = Arc::new(ArtifactStore::new(directory.join("artifacts"), 4096).unwrap());
+        let staged = artifacts
+            .put(
+                "main",
+                &expected_hash,
+                100,
+                0,
+                "raito_fetch_request",
+                b"synthetic-job-manifest",
+            )
+            .await
+            .unwrap();
+        let core = CoreRpc::new(&rpc_url, "unit".into(), "test".into()).unwrap();
+        let manager = JobManager::new_with_verifier(
+            directory.join("jobs"),
+            artifacts.clone(),
+            core.clone(),
+            Arc::new(ChainTracker::new(false)),
+            WorkerPrograms {
+                raito: Some(fetcher),
+                shinigami: None,
+            },
+            Some(RaitoVerifier {
+                executable: verifier,
+                binary_sha256: hash_bytes(verifier_body.as_bytes()),
+            }),
+            JobLimits {
+                memory_budget_mib: 2,
+                worker_count: 1,
+                raito_fetch_config: Some(config_path),
+            },
+        )
+        .unwrap();
+        let started = manager
+            .submit_with_txid("raito", &staged.id, 2, &policy, Some(&expected_txid))
+            .await
+            .unwrap();
+        let finished = timeout(Duration::from_secs(8), async {
+            loop {
+                let job = manager.status(&started.id).await.unwrap();
+                if matches!(
+                    job.status,
+                    JobStatus::VerifiedRaito | JobStatus::Failed
+                        | JobStatus::CompletedUnverified | JobStatus::OutputEvicted
+                ) {
+                    break job;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(finished.status, JobStatus::VerifiedRaito, "{:?}", finished.error);
+        assert_eq!(finished.verified_raito.as_ref(), Some(&receipt));
+        let published = manager.verified_receipt(&started.id).await.unwrap();
+        assert_eq!(published["proof_verified"], true);
+        assert_eq!(published["verified_statement"]["txid"], expected_txid);
+        let part = manager.result_chunk(&started.id, 0, 20).await.unwrap();
+        assert_eq!(part["proof_verified"], true);
+        assert_eq!(hex::decode(part["data_hex"].as_str().unwrap()).unwrap(), &content[..20]);
+
+        // Receipt survives a gateway restart with a new in-memory job map.
+        let reopened = JobManager::new(
+            directory.join("jobs"),
+            artifacts,
+            core,
+            Arc::new(ChainTracker::new(false)),
+            WorkerPrograms::default(),
+            2,
+            1,
+        )
+        .unwrap();
+        assert_eq!(reopened.verified_receipt(&started.id).await.unwrap()["proof_verified"], true);
+
+        let mut tampered = finished.clone();
+        tampered.verified_raito.as_mut().unwrap().txid = "cd".repeat(32);
+        atomic_json(&manager.root, &tampered).unwrap();
+        let tampered_load = JobManager::new(
+            directory.join("jobs"),
+            Arc::new(ArtifactStore::new(directory.join("artifacts"), 4096).unwrap()),
+            CoreRpc::new(&rpc_url, "unit".into(), "test".into()).unwrap(),
+            Arc::new(ChainTracker::new(false)),
+            WorkerPrograms::default(),
+            2,
+            1,
+        )
+        .unwrap();
+        assert!(tampered_load.verified_receipt(&started.id).await.is_err());
+        atomic_json(&manager.root, &finished).unwrap();
+        active.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(manager.verified_receipt(&started.id).await.is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn approved_worker_runs_and_receipt_is_explicitly_unverified() {
