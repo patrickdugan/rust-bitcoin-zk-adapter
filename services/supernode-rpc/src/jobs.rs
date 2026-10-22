@@ -814,11 +814,14 @@ mod tests {
         atomic_json(&jobs.root, &record).unwrap();
         let abandoned_input = jobs.root.join(format!("{}.input", record.id));
         let abandoned_output = jobs.root.join(format!("{}.output", record.id));
+        let abandoned_index = jobs.root.join(format!("{}.chunks", record.id));
+        fs::write(&abandoned_index, b"stale-index").unwrap();
         fs::write(&abandoned_input, b"stale-input").unwrap();
         fs::write(&abandoned_output, b"stale-output").unwrap();
         let restarted = manager(&dir);
         assert!(!abandoned_input.exists());
         assert!(!abandoned_output.exists());
+        assert!(!abandoned_index.exists());
         let status = restarted.status(&record.id).await.unwrap();
         assert_eq!(status.status, JobStatus::Interrupted);
         fs::remove_dir_all(dir).unwrap();
@@ -957,6 +960,10 @@ mod tests {
         assert_eq!(completed.status, JobStatus::CompletedUnverified);
         assert_eq!(completed.result_sha256, Some(hash_bytes(content)));
         assert_eq!(completed.result_bytes, Some(content.len() as u64));
+        let index_path = jobs.root.join(format!("{}.chunks", queued.id));
+        let original_index = fs::read(&index_path).unwrap();
+        assert_eq!(original_index.len(), 32);
+        assert_eq!(completed.result_chunk_index_sha256, Some(hash_bytes(&original_index)));
 
         let first = jobs.result_chunk(&queued.id, 0, 8).await.unwrap();
         assert_eq!(first["proof_verified"], false);
@@ -983,6 +990,10 @@ mod tests {
             .result_chunk(&queued.id, content.len() as u64 + 1, 16)
             .await
             .is_err());
+
+        fs::write(&index_path, b"corrupted-index").unwrap();
+        assert!(jobs.result_chunk(&queued.id, 0, 10).await.is_err());
+        fs::write(&index_path, original_index).unwrap();
 
         let result_path = jobs.root.join(format!("{}.output", queued.id));
         fs::write(&result_path, b"tampered-result").unwrap();
