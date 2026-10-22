@@ -62,3 +62,17 @@ fn real_mainnet_scripts_cover_direct_and_pushdata1() {
     assert_eq!(&pd1[..3], &[0x6a, 0x4c, 0x50]);
     assert_eq!(decode_op_return(&pd1).unwrap().len(), 80);
 }
+
+#[test]
+fn verified_transaction_consumers_get_stable_output_positions() {
+    let raw = hex_bytes(include_str!(
+        "../fixtures/mainnet/2033435de7ce307341231e818ed937cd3a5e8597381fd83a7e5b0234f61b38d3.hex"
+    ));
+    let tx: Transaction = deserialize(&raw).unwrap();
+    let candidates = rust_bitcoin_zk_adapter::extract_transaction_candidates(&tx, 7);
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].txid, tx.compute_txid());
+    assert_eq!(candidates[0].tx_index, 7);
+    assert_eq!(candidates[0].vout, 1);
+    assert_eq!(candidates[0].script, tx.output[1].script_pubkey.as_bytes());
+}
