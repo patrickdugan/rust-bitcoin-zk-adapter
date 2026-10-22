@@ -312,7 +312,8 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if std::fs::metadata(&output).is_ok_and(|m| m.len() >= TRANSFER_CHUNK_BYTES as u64) {
+                if std::fs::metadata(&output).is_ok_and(|m| m.len() >= TRANSFER_CHUNK_BYTES as u64)
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
