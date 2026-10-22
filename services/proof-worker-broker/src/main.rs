@@ -235,9 +235,10 @@ async fn launch_worker(
 }
 
 async fn accept_one(
-    mut stream: UnixStream,
-    config: Arc<Config>,
+    stream: &mut UnixStream,
+    config: &Config,
     _permit: OwnedSemaphorePermit,
+    reply_started: &mut bool,
 ) -> Result<(), String> {
     let peer = stream.peer_cred().map_err(|e| e.to_string())?;
     if peer.uid() != config.gateway_uid {
@@ -284,7 +285,8 @@ async fn accept_one(
         result_sha256: Some(digest),
         error: None,
     };
-    write_header(&mut stream, &reply).await?;
+    write_header(&mut *stream, &reply).await?;
+    *reply_started = true;
     let mut result = tokio::fs::File::open(&output)
         .await
         .map_err(|e| e.to_string())?;
@@ -316,9 +318,16 @@ async fn serve_one(stream: UnixStream, config: Arc<Config>) {
             return;
         }
     };
-    // Transfer errors may occur after a success header; the client rejects
-    // incomplete data and its own independently recomputed SHA-256.
-    let _ = accept_one(stream, config, permit).await;
+    let mut reply_started = false;
+    let result = accept_one(&mut stream, &config, permit, &mut reply_started).await;
+    // Return a bounded, unverified error header for failed admission, input
+    // staging, worker execution, and proof-file validation. A partial output
+    // transfer can only fail through EOF or digest mismatch at the gateway.
+    if let Err(error) = result {
+        if !reply_started {
+            let _ = write_header(&mut stream, &RunReply::rejected(&error)).await;
+        }
+    }
 }
 
 #[tokio::main]
@@ -333,6 +342,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     loop {
         let (stream, _) = listener.accept().await?;
+        // Reject other local identities before spawning a task or using a
+        // worker semaphore. The Unix socket's group includes the broker UID,
+        // but only the gateway UID may submit a proof computation.
+        if stream.peer_cred().map(|cred| cred.uid()) != Ok(config.gateway_uid) {
+            continue;
+        }
         let config = Arc::clone(&config);
         tokio::spawn(serve_one(stream, config));
     }

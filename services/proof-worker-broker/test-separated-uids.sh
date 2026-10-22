@@ -102,3 +102,20 @@ with open(metadata, encoding="utf8") as record:
     assert record.read() == "trusted-metadata-unchanged"
 print("Kernel UID isolation accepted unverified worker output and protected gateway metadata")
 PY
+
+# The socket is intentionally group-addressable. A subprocess using the
+# broker UID must still fail kernel peer-credential authorization.
+sudo -u "$worker_user" python3 - "$tmp/socket/broker.sock" <<'PY'
+import socket
+import sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    s.settimeout(5)
+    s.connect(sys.argv[1])
+    try:
+        s.sendall(b"{}\n")
+        reply = s.recv(1)
+        assert reply == b"", "broker replied to a non-gateway UID"
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+print("Worker UID rejected by broker peer-credential gate")
+PY

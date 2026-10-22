@@ -129,3 +129,12 @@ symlink/hardlink races, gateway and broker SIGKILL, stale socket cleanup,
 worker output quota and process-tree termination. Obtain one genuine Raito
 compressed proof from a real Bitcoin Core mainnet host and inspect the typed
 verified receipt. Keep Issue #2 open until these gates pass.
+
+## Negative local-identity tests
+
+The CI script additionally connects from the worker/broker UID and checks
+that the socket refuses the request even though filesystem group membership
+would permit opening it. The kernel peer-credential gate is independent of
+the socket's mode bits. The broker returns bounded error frames for malformed
+authorized requests while preserving the rule that no broker response may
+assert a verified Raito statement.
