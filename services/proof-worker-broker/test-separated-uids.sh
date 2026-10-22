@@ -28,7 +28,7 @@ chmod 0700 "$tmp/gateway"
 sudo chown "$broker_uid:$(id -g)" "$tmp/socket" "$tmp/staging"
 sudo chmod 0770 "$tmp/socket"
 sudo chmod 0700 "$tmp/staging"
-cat > "$tmp/staging/mock-worker.sh" <<EOF
+sudo tee "$tmp/staging/mock-worker.sh" >/dev/null <<EOF
 #!/bin/sh
 set -eu
 output=""
