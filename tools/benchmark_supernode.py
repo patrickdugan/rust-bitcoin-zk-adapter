@@ -50,7 +50,7 @@ class RPC:
         self.opener = build_opener(ProxyHandler({}))
 
     def call(self, method: str, params: list):
-        body = json.dumps({"jsonrpc": "2.0", "id": 1,
+        body = json.dumps({"jsonrpc": "1.0", "id": 1,
                            "method": method, "params": params}).encode()
         req = Request(self.url, data=body,
                       headers={"Content-Type": "application/json",
