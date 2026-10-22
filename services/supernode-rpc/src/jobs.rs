@@ -870,8 +870,12 @@ mod tests {
             length,
             MAX_RESULT_CHUNK_BYTES as u64 - 4,
             20,
-        ).unwrap();
-        assert_eq!(crossing, data[MAX_RESULT_CHUNK_BYTES - 4..MAX_RESULT_CHUNK_BYTES + 16]);
+        )
+        .unwrap();
+        assert_eq!(
+            crossing,
+            data[MAX_RESULT_CHUNK_BYTES - 4..MAX_RESULT_CHUNK_BYTES + 16]
+        );
         let tail = indexed_chunk(
             &directory,
             &id,
@@ -879,7 +883,8 @@ mod tests {
             length,
             (MAX_RESULT_CHUNK_BYTES * 2) as u64,
             5,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(tail, data[MAX_RESULT_CHUNK_BYTES * 2..]);
 
         let mut tampered = data;
@@ -893,7 +898,8 @@ mod tests {
             length,
             MAX_RESULT_CHUNK_BYTES as u64 - 4,
             20,
-        ).is_err());
+        )
+        .is_err());
 
         fs::write(directory.join(format!("{id}.chunks")), b"corrupt").unwrap();
         assert!(indexed_chunk(&directory, &id, &index_sha, length, 0, 16).is_err());
