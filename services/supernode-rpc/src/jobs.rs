@@ -343,6 +343,7 @@ pub struct JobManager {
     raito_fetch_config: Option<PathBuf>,
     memory: Arc<Semaphore>,
     slots: Arc<Semaphore>,
+    raito_slots: Arc<Semaphore>,
     queue_slots: Arc<Semaphore>,
     memory_budget_mib: u32,
     worker_count: usize,
@@ -514,6 +515,9 @@ impl JobManager {
             raito_fetch_config,
             memory: Arc::new(Semaphore::new(memory_budget_mib as usize)),
             slots: Arc::new(Semaphore::new(worker_count)),
+            // Held throughout Raito proving + verification, including any
+            // gap while waiting for shared memory/worker-slot permits.
+            raito_slots: Arc::new(Semaphore::new(worker_count)),
             queue_slots: Arc::new(Semaphore::new(MAX_PENDING_JOBS)),
             memory_budget_mib,
             worker_count,
@@ -532,6 +536,7 @@ impl JobManager {
             "shinigami_worker_configured":self.workers.enabled(&JobKind::Shinigami),
             "max_pending":MAX_PENDING_JOBS,
             "max_worker_count":self.worker_count,
+            "max_active_raito_outputs":self.worker_count,
             "memory_admission_budget_mib":self.memory_budget_mib,
             "hard_os_memory_limit_enforced":false,
             "max_worker_time_seconds":MAX_WORKER_DURATION.as_secs(),
@@ -740,6 +745,11 @@ impl JobManager {
             .clone()
             .try_acquire_owned()
             .map_err(|_| "proof verification queue capacity exhausted")?;
+        let raito_permit = self
+            .raito_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "active Raito proof-output capacity exhausted")?;
         let original = self.status(id).await?;
         if original.kind != JobKind::Raito
             || original.expected_txid.is_none()
@@ -779,6 +789,7 @@ impl JobManager {
         let digest = actual;
         tokio::spawn(async move {
             let _permit = queue_permit;
+            let _raito_output = raito_permit;
             if let Err(error) = manager
                 .verify_existing_record(&original, &digest, size)
                 .await
@@ -968,6 +979,28 @@ impl JobManager {
     async fn run(self: Arc<Self>, id: String, _queue_permit: OwnedSemaphorePermit) {
         let Some(record) = self.records.lock().await.get(&id).cloned() else {
             return;
+        };
+        // Hold the Raito output pin through both proving and verification.
+        // Without this reservation, up to 16 queued jobs could simultaneously
+        // pin 64 MiB outputs while awaiting a verifier slot.
+        let _raito_output = if record.kind == JobKind::Raito {
+            match self.raito_slots.clone().acquire_owned().await {
+                Ok(permit) => Some(permit),
+                Err(error) => {
+                    self.set_status(
+                        &id,
+                        JobStatus::Failed,
+                        None,
+                        None,
+                        None,
+                        Some(format!("Raito output capacity unavailable: {error}")),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            None
         };
         let input_path = self.root.join(format!("{id}.input"));
         let output_path = self.root.join(format!("{id}.output"));

@@ -309,3 +309,15 @@ can escape this mechanism. Production deployments must additionally keep
 fetcher, verifier and their descendants inside OS-managed cgroups with hard
 memory, swap, disk and process-count limits. The optional cgroup preflight
 checks the inherited kernel boundary but never creates it.
+
+### Bounded active Raito proof outputs
+
+A dedicated Raito output semaphore, capped at the configured worker count
+(maximum four), is held from the start of a Raito proof job through proof
+verification and cleanup. A retry must acquire a free output permit before
+transitioning to `verifying_raito`. Because each worker output is capped at
+64 MiB, no more than four concurrently running/pinned Raito proof outputs
+are admitted (256 MiB total), even when all dispatcher queue slots are
+occupied. Separate from this, retained completed outputs still use the
+oldest-first 256 MiB budget. Kernel disk quotas remain necessary while
+workers write files and for non-Raito worker outputs.
