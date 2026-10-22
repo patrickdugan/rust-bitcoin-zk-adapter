@@ -18,7 +18,8 @@ or [Raito](https://github.com/starkware-bitcoin/raito).
 
 Raito already implements [compressed SPV verification](https://github.com/starkware-bitcoin/raito/tree/main/crates/raito-spv-verify) in Rust, with a
 [bzip2/bincode client](https://github.com/starkware-bitcoin/raito/tree/main/crates/raito-spv-client).
-Heavy Cairo/STWO verification dependencies belong in an **optional integration crate**.
+Heavy Cairo/STWO verification dependencies live in the separately built
+[optional Raito integration](integrations/raito/), pinned to an upstream commit.
 The default sidecar stays small and compiles without them.
 
 ## Available functionality

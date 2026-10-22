@@ -1,0 +1,15 @@
+name: Raito integration compatibility
+on:
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-07-14
+          components: clippy, rustfmt
+      - run: cargo +nightly-2025-07-14 fmt --manifest-path integrations/raito/Cargo.toml -- --check
+      - run: cargo +nightly-2025-07-14 check --manifest-path integrations/raito/Cargo.toml

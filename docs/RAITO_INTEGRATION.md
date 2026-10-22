@@ -66,3 +66,9 @@ Do not run Raito in development mode for security decisions because
 `verify_proof` bypasses some checks when `dev=true`.
 Do not treat parsing a proof file or matching a Merkle root as
 verification of its Cairo/STARK proof.
+
+## Optional Rust backend
+
+The [isolated Raito integration](../integrations/raito/README.md) invokes
+Raito's actual STARK verifier. It is kept separate from default builds and
+requires its own nightly toolchain and compatibility checks.
