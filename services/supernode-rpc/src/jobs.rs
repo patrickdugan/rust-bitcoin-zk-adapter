@@ -218,7 +218,12 @@ fn prune_result_files(
             Some(length) if (1..=MAX_WORKER_OUTPUT_BYTES).contains(&length) => {
                 record.result_bytes = Some(length);
                 total = total.saturating_add(length);
-                retained.push((record.submitted_unix, id.clone(), length));
+                // A verifier is actively reading this file. Evict only
+                // completed results, otherwise a quota sweep can corrupt
+                // ongoing verification and waste a costly STARK run.
+                if record.status != JobStatus::VerifyingRaito {
+                    retained.push((record.submitted_unix, id.clone(), length));
+                }
             }
             _ => {
                 record.status = JobStatus::OutputEvicted;
@@ -658,7 +663,10 @@ impl JobManager {
                 let oldest_done = state
                     .iter()
                     .filter(|(_, record)| {
-                        !matches!(record.status, JobStatus::Queued | JobStatus::Running)
+                        !matches!(
+                            record.status,
+                            JobStatus::Queued | JobStatus::Running | JobStatus::VerifyingRaito
+                        )
                     })
                     .min_by_key(|(_, record)| record.submitted_unix)
                     .map(|(id, _)| id.clone());
@@ -1236,6 +1244,56 @@ mod tests {
             let id = format!("{index:064x}");
             assert_eq!(records[&id].status, JobStatus::CompletedUnverified);
             assert!(directory.join(format!("{id}.output")).exists());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+
+    #[test]
+    fn retention_never_evits_an_inflight_raito_verifier() {
+        let directory = tmp("quota-verifier");
+        fs::create_dir_all(&directory).unwrap();
+        let mut records = BTreeMap::new();
+        for (index, status) in [
+            (1u8, JobStatus::CompletedUnverified),
+            (2u8, JobStatus::VerifyingRaito),
+            (3u8, JobStatus::CompletedUnverified),
+        ] {
+            let id = format!("{index:064x}");
+            let bytes = vec![index; 6];
+            fs::write(directory.join(format!("{id}.output")), &bytes).unwrap();
+            let record = JobRecord {
+                id: id.clone(),
+                kind: JobKind::Raito,
+                input_artifact_id: "ee".repeat(32),
+                network: "regtest".into(),
+                block_hash: "ab".repeat(32),
+                block_height: 42,
+                chain_epoch: 0,
+                policy_sha256: "dd".repeat(32),
+                estimated_memory_mib: 1,
+                expected_txid: Some("aa".repeat(32)),
+                status,
+                result_sha256: Some(hash_bytes(&bytes)),
+                result_bytes: Some(bytes.len() as u64),
+                result_chunk_index_sha256: None,
+                verified_raito: None,
+                error: None,
+                submitted_unix: index as u64,
+                finished_unix: None,
+            };
+            records.insert(id, record);
+        }
+        // With a six-byte budget, both completed outputs must be evicted
+        // while the in-flight verifier's six-byte proof stays untouched.
+        prune_result_files(&directory, &mut records, 6).unwrap();
+        let pinned_id = format!("{:064x}", 2u8);
+        assert_eq!(records[&pinned_id].status, JobStatus::VerifyingRaito);
+        assert_eq!(fs::read(directory.join(format!("{pinned_id}.output"))).unwrap(), vec![2; 6]);
+        for index in [1u8, 3u8] {
+            let id = format!("{index:064x}");
+            assert_eq!(records[&id].status, JobStatus::OutputEvicted);
+            assert!(!directory.join(format!("{id}.output")).exists());
         }
         fs::remove_dir_all(directory).unwrap();
     }

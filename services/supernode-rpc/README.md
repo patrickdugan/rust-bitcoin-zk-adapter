@@ -259,3 +259,5 @@ A gateway restart during `verifying_raito` likewise restores the job to
 `completed_unverified` without promoting the statement or automatically
 replaying the expensive verifier. Legacy completed outputs remain unverified
 until an independent verifier accepts them.
+
+In-flight `verifying_raito` outputs are pinned against completed-result quota eviction until the verifier finishes. These temporary files still count toward the quota; a sweep evicts older completed outputs first. The maximum number of active worker slots is four and each proof output is capped at 64 MiB. A hard disk quota is still required for workers while they write their outputs.
