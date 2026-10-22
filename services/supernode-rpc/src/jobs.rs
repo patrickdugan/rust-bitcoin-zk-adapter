@@ -387,7 +387,7 @@ impl JobManager {
         for entry in fs::read_dir(&root).map_err(|err| err.to_string())? {
             let entry = entry.map_err(|err| err.to_string())?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains(".tmp-") {
+            if name.contains(".tmp-") || name.strip_suffix(".verifytmp").is_some_and(is_hash) {
                 let _ = fs::remove_file(entry.path());
                 continue;
             }
@@ -858,7 +858,7 @@ impl JobManager {
                 self.set_status(
                     &id,
                     JobStatus::CompletedUnverified,
-                    Some(digest),
+                    Some(digest.clone()),
                     Some(size),
                     Some(index_digest),
                     None,
@@ -895,7 +895,7 @@ impl JobManager {
                             // The raw proof remains available for inspection,
                             // always labeled unverified. Never trust prover bytes.
                             let mut state = self.records.lock().await;
-                            if let Some(current) = state.get_mut(&id) {
+                            if let Some(current) = state.get_mut(&id).filter(|r| r.status == JobStatus::CompletedUnverified) {
                                 current.error = Some(format!("Raito verification: {err}"));
                                 if let Err(e) = atomic_json(&self.root, current) {
                                     eprintln!("Could not persist verification error: {e}");

@@ -37,10 +37,15 @@ fn file_digest(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
     let mut engine = sha256::Hash::engine();
     let mut buffer = [0u8; 65536];
+    let mut total = 0u64;
     loop {
         let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
+        }
+        total += n as u64;
+        if total > MAX_VERIFIER_BINARY_BYTES {
+            return Err("Raito verifier executable changed while hashing".into());
         }
         engine.input(&buffer[..n]);
     }
@@ -107,7 +112,15 @@ impl RaitoVerifier {
             if !meta.file_type().is_file() || meta.len() == 0 || meta.len() > MAX_RECEIPT_BYTES {
                 return Err("Raito verifier returned unsafe or oversized receipt".into());
             }
-            let bytes = fs::read(&receipt_path).map_err(|e| e.to_string())?;
+            let mut bytes = Vec::with_capacity(meta.len() as usize);
+            File::open(&receipt_path)
+                .map_err(|e| e.to_string())?
+                .take(MAX_RECEIPT_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+                return Err("Raito verifier receipt grew beyond size limit".into());
+            }
             let report: RaitoVerifiedReceipt =
                 serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             report.validate(record, result_sha256)?;
@@ -140,7 +153,7 @@ impl RaitoVerifiedReceipt {
     pub fn validate(&self, record: &JobRecord, expected_digest: &str) -> Result<(), String> {
         if self.statement != STATEMENT
             || self.verifier != VERIFIER_ID
-            || record.expected_txid.as_deref() != Some(&self.txid)
+            || record.expected_txid.as_deref() != Some(self.txid.as_str())
             || self.block_hash != record.block_hash
             || u64::from(self.block_height) != record.block_height
             || self.proven_tip_height < self.block_height
@@ -208,6 +221,45 @@ mod tests {
         receipt.policy_sha256 = job.policy_sha256.clone();
         receipt.proven_tip_height = 41;
         assert!(receipt.validate(&job, &"ef".repeat(32)).is_err());
+    }
+
+
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_external_verifier_receipt_contract_rejects_replacement() {
+        // The fixture is a *mock verifier* for IPC/receipt plumbing only.
+        // Real Raito STARK verification lives in integrations/raito.
+        use std::os::unix::fs::PermissionsExt;
+        let (job, receipt) = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "raito-receipt-contract-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("mock-raito-verifier.sh");
+        let script = format!(
+            "#!/bin/sh\ncat > \"$7\" <<'RECEIPT'\n{}\nRECEIPT\n",
+            serde_json::to_string(&receipt).unwrap()
+        );
+        fs::write(&executable, &script).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let verifier = RaitoVerifier {
+            executable: executable.clone(),
+            binary_sha256: file_digest(&executable).unwrap(),
+        };
+        let actual = verifier
+            .verify(&root, &job, &receipt.proof_sha256)
+            .await
+            .unwrap();
+        assert_eq!(actual, receipt);
+        assert!(!root.join(format!("{}.verifytmp", job.id)).exists());
+
+        // A changed executable cannot be used with the old trusted pin.
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        assert!(verifier.validate().is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
