@@ -895,7 +895,10 @@ impl JobManager {
                             // The raw proof remains available for inspection,
                             // always labeled unverified. Never trust prover bytes.
                             let mut state = self.records.lock().await;
-                            if let Some(current) = state.get_mut(&id).filter(|r| r.status == JobStatus::CompletedUnverified) {
+                            if let Some(current) = state
+                                .get_mut(&id)
+                                .filter(|r| r.status == JobStatus::CompletedUnverified)
+                            {
                                 current.error = Some(format!("Raito verification: {err}"));
                                 if let Err(e) = atomic_json(&self.root, current) {
                                     eprintln!("Could not persist verification error: {e}");

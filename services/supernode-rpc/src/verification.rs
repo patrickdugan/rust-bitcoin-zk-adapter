@@ -223,8 +223,6 @@ mod tests {
         assert!(receipt.validate(&job, &"ef".repeat(32)).is_err());
     }
 
-
-
     #[cfg(unix)]
     #[tokio::test]
     async fn pinned_external_verifier_receipt_contract_rejects_replacement() {
@@ -232,10 +230,8 @@ mod tests {
         // Real Raito STARK verification lives in integrations/raito.
         use std::os::unix::fs::PermissionsExt;
         let (job, receipt) = fixture();
-        let root = std::env::temp_dir().join(format!(
-            "raito-receipt-contract-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("raito-receipt-contract-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let executable = root.join("mock-raito-verifier.sh");
