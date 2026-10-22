@@ -273,6 +273,11 @@ impl JobManager {
         if actual.as_str() != Some(record.block_hash.as_str()) {
             return Err("job's block was disconnected or chain changed".into());
         }
+        let network = self.core.call("getblockchaininfo", json!([]))
+            .await.map_err(|error| error.message)?;
+        if network["chain"].as_str() != Some(record.network.as_str()) {
+            return Err("proving input belongs to a different Bitcoin network".into());
+        }
         Ok(())
     }
 
@@ -580,6 +585,8 @@ mod tests {
                         } else {
                             json!("cc".repeat(32))
                         }
+                    } else if body["method"] == "getblockchaininfo" {
+                        json!({"chain":"regtest"})
                     } else {
                         Value::Null
                     };
