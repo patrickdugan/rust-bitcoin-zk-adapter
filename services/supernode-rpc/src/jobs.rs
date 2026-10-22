@@ -477,7 +477,9 @@ impl JobManager {
                     && !records.get(id).is_some_and(|r| {
                         matches!(
                             r.status,
-                            JobStatus::CompletedUnverified | JobStatus::VerifyingRaito | JobStatus::VerifiedRaito
+                            JobStatus::CompletedUnverified
+                                | JobStatus::VerifyingRaito
+                                | JobStatus::VerifiedRaito
                         )
                     })
             }) || name.strip_suffix(".input").is_some_and(is_hash)
@@ -486,7 +488,9 @@ impl JobManager {
                         && !records.get(id).is_some_and(|record| {
                             matches!(
                                 record.status,
-                                JobStatus::CompletedUnverified | JobStatus::VerifyingRaito | JobStatus::VerifiedRaito
+                                JobStatus::CompletedUnverified
+                                    | JobStatus::VerifyingRaito
+                                    | JobStatus::VerifiedRaito
                             )
                         })
                 });
@@ -701,7 +705,10 @@ impl JobManager {
                 eprintln!("Could not persist proof job status: {err}");
             }
         }
-        if matches!(status, JobStatus::CompletedUnverified | JobStatus::VerifyingRaito) {
+        if matches!(
+            status,
+            JobStatus::CompletedUnverified | JobStatus::VerifyingRaito
+        ) {
             if let Err(err) =
                 prune_result_files(&self.root, &mut records, MAX_RETAINED_RESULT_BYTES)
             {
@@ -1085,7 +1092,6 @@ mod tests {
         assert_eq!(status.status, JobStatus::Interrupted);
         fs::remove_dir_all(dir).unwrap();
     }
-
 
     #[tokio::test]
     async fn interrupted_raito_verification_preserves_unverified_proof_and_hashes() {
