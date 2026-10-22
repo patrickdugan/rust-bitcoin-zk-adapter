@@ -41,7 +41,11 @@ fn is_hash(value: &str) -> bool {
 }
 fn secure_dir(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root).map_err(|err| err.to_string())?;
-    if fs::symlink_metadata(root).map_err(|err| err.to_string())?.file_type().is_symlink() {
+    if fs::symlink_metadata(root)
+        .map_err(|err| err.to_string())?
+        .file_type()
+        .is_symlink()
+    {
         return Err("job directory cannot be a symlink".into());
     }
     #[cfg(unix)]
@@ -54,11 +58,16 @@ fn secure_dir(root: &Path) -> Result<(), String> {
 }
 fn atomic_json(root: &Path, job: &JobRecord) -> Result<(), String> {
     let path = root.join(format!("{}.json", job.id));
-    let micros = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|err| err.to_string())?.as_nanos();
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_nanos();
     let temp = root.join(format!("{}.tmp-{}-{micros}", job.id, std::process::id()));
     let bytes = serde_json::to_vec(job).map_err(|err| err.to_string())?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
         .map_err(|err| err.to_string())?;
     file.write_all(&bytes).map_err(|err| err.to_string())?;
     file.sync_all().map_err(|err| err.to_string())?;
@@ -126,7 +135,8 @@ impl WorkerPrograms {
         }
     }
     fn enabled(&self, kind: &JobKind) -> bool {
-        self.executable(kind).is_some_and(|path| path.is_absolute() && path.is_file())
+        self.executable(kind)
+            .is_some_and(|path| path.is_absolute() && path.is_file())
     }
 }
 
@@ -154,7 +164,8 @@ impl JobManager {
         memory_budget_mib: u32,
         worker_count: usize,
     ) -> Result<Arc<Self>, String> {
-        if memory_budget_mib == 0 || memory_budget_mib > MAX_ESTIMATED_MEMORY_MIB
+        if memory_budget_mib == 0
+            || memory_budget_mib > MAX_ESTIMATED_MEMORY_MIB
             || !(1..=4).contains(&worker_count)
         {
             return Err("invalid proof worker count or memory budget".into());
@@ -162,7 +173,9 @@ impl JobManager {
         secure_dir(&root)?;
         for binary in [&workers.raito, &workers.shinigami].into_iter().flatten() {
             if !binary.is_absolute() || !binary.is_file() {
-                return Err("proof worker executable path must be an existing absolute file".into());
+                return Err(
+                    "proof worker executable path must be an existing absolute file".into(),
+                );
             }
         }
         let mut records = BTreeMap::new();
@@ -173,14 +186,24 @@ impl JobManager {
                 let _ = fs::remove_file(entry.path());
                 continue;
             }
-            let Some(id) = name.strip_suffix(".json") else { continue };
+            let Some(id) = name.strip_suffix(".json") else {
+                continue;
+            };
             if !is_hash(id) || !entry.file_type().map_err(|err| err.to_string())?.is_file() {
                 continue;
             }
-            let Ok(bytes) = fs::read(entry.path()) else { continue };
-            if bytes.len() > 4_096 { continue; }
-            let Ok(mut record) = serde_json::from_slice::<JobRecord>(&bytes) else { continue };
-            if record.id != id { continue; }
+            let Ok(bytes) = fs::read(entry.path()) else {
+                continue;
+            };
+            if bytes.len() > 4_096 {
+                continue;
+            }
+            let Ok(mut record) = serde_json::from_slice::<JobRecord>(&bytes) else {
+                continue;
+            };
+            if record.id != id {
+                continue;
+            }
             if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
                 record.status = JobStatus::Interrupted;
                 record.error = Some("gateway restarted; job must be resubmitted".into());
@@ -190,7 +213,8 @@ impl JobManager {
             records.insert(id.to_owned(), record);
         }
         if records.len() > MAX_JOB_HISTORY {
-            let oldest = records.iter()
+            let oldest = records
+                .iter()
                 .map(|(id, rec)| (rec.submitted_unix, id.clone()))
                 .collect::<Vec<_>>();
             let mut oldest = oldest;
@@ -229,14 +253,23 @@ impl JobManager {
     }
 
     pub async fn status(&self, id: &str) -> Result<JobRecord, String> {
-        if !is_hash(id) { return Err("invalid job identifier".into()); }
-        self.records.lock().await
-            .get(id).cloned().ok_or("job identifier not found".into())
+        if !is_hash(id) {
+            return Err("invalid job identifier".into());
+        }
+        self.records
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or("job identifier not found".into())
     }
 
     async fn check_chain(&self, record: &JobRecord) -> Result<(), String> {
-        let actual = self.core.call("getblockhash", json!([record.block_height]))
-            .await.map_err(|error| error.message)?;
+        let actual = self
+            .core
+            .call("getblockhash", json!([record.block_height]))
+            .await
+            .map_err(|error| error.message)?;
         if actual.as_str() != Some(record.block_hash.as_str())
             || self.chain.epoch().await != record.chain_epoch
         {
@@ -261,8 +294,11 @@ impl JobManager {
         if memory_mib == 0 || memory_mib > self.memory_budget_mib || !is_hash(policy_sha256) {
             return Err("invalid memory reservation or policy hash".into());
         }
-        let queue_permit = self.queue_slots.clone()
-            .try_acquire_owned().map_err(|_| "proof queue capacity exhausted")?;
+        let queue_permit = self
+            .queue_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "proof queue capacity exhausted")?;
         let (meta, _) = self.artifacts.get(artifact_id).await?;
         let marker = format!(
             "{}:{}:{:?}:{}:{policy_sha256}:{}",
@@ -270,7 +306,10 @@ impl JobManager {
             meta.block_hash,
             kind,
             unix_time(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
         );
         let id = hash_bytes(marker.as_bytes());
         let record = JobRecord {
@@ -293,10 +332,13 @@ impl JobManager {
         {
             let mut state = self.records.lock().await;
             if state.len() >= MAX_JOB_HISTORY {
-                let oldest_done = state.iter().filter(|(_, record)| {
-                    !matches!(record.status, JobStatus::Queued | JobStatus::Running)
-                }).min_by_key(|(_, record)| record.submitted_unix)
-                .map(|(id, _)| id.clone());
+                let oldest_done = state
+                    .iter()
+                    .filter(|(_, record)| {
+                        !matches!(record.status, JobStatus::Queued | JobStatus::Running)
+                    })
+                    .min_by_key(|(_, record)| record.submitted_unix)
+                    .map(|(id, _)| id.clone());
                 if let Some(old_id) = oldest_done {
                     state.remove(&old_id);
                     let _ = fs::remove_file(self.root.join(format!("{old_id}.json")));
@@ -315,7 +357,11 @@ impl JobManager {
     }
 
     async fn set_status(
-        &self, id: &str, status: JobStatus, digest: Option<String>, error: Option<String>,
+        &self,
+        id: &str,
+        status: JobStatus,
+        digest: Option<String>,
+        error: Option<String>,
     ) {
         let mut records = self.records.lock().await;
         if let Some(record) = records.get_mut(id) {
@@ -332,18 +378,29 @@ impl JobManager {
     }
 
     async fn run(self: Arc<Self>, id: String, _queue_permit: OwnedSemaphorePermit) {
-        let Some(record) = self.records.lock().await.get(&id).cloned() else { return };
+        let Some(record) = self.records.lock().await.get(&id).cloned() else {
+            return;
+        };
         let result: Result<String, String> = async {
-            let _memory = self.memory.clone()
+            let _memory = self
+                .memory
+                .clone()
                 .acquire_many_owned(record.estimated_memory_mib)
-                .await.map_err(|err| err.to_string())?;
-            let _slot = self.slots.clone()
-                .acquire_owned().await.map_err(|err| err.to_string())?;
+                .await
+                .map_err(|err| err.to_string())?;
+            let _slot = self
+                .slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|err| err.to_string())?;
             self.check_chain(&record).await?;
             let (_, data) = self.artifacts.get(&record.input_artifact_id).await?;
             self.set_status(&id, JobStatus::Running, None, None).await;
 
-            let worker = self.workers.executable(&record.kind)
+            let worker = self
+                .workers
+                .executable(&record.kind)
                 .ok_or("configured worker disappeared")?;
             let input = self.root.join(format!("{id}.input"));
             let output = self.root.join(format!("{id}.output"));
@@ -352,12 +409,18 @@ impl JobManager {
             // Only the operator chooses executable paths. No shell is used,
             // and no RPC field can become part of the executable filename.
             let mut cmd = Command::new(worker);
-            cmd.arg("--input").arg(&input)
-                .arg("--output").arg(&output)
-                .arg("--network").arg(&record.network)
-                .arg("--blockhash").arg(&record.block_hash)
-                .arg("--height").arg(record.block_height.to_string())
-                .arg("--policy-sha256").arg(&record.policy_sha256)
+            cmd.arg("--input")
+                .arg(&input)
+                .arg("--output")
+                .arg(&output)
+                .arg("--network")
+                .arg(&record.network)
+                .arg("--blockhash")
+                .arg(&record.block_hash)
+                .arg("--height")
+                .arg(record.block_height.to_string())
+                .arg("--policy-sha256")
+                .arg(&record.policy_sha256)
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
                 .stdin(Stdio::null())
@@ -365,7 +428,8 @@ impl JobManager {
                 .stderr(Stdio::null())
                 .kill_on_drop(true);
 
-            let status = timeout(MAX_WORKER_DURATION, cmd.status()).await
+            let status = timeout(MAX_WORKER_DURATION, cmd.status())
+                .await
                 .map_err(|_| "worker runtime budget exceeded")?
                 .map_err(|err| err.to_string())?;
             let _ = fs::remove_file(input);
@@ -375,18 +439,24 @@ impl JobManager {
             }
             self.check_chain(&record).await?;
             let meta = fs::symlink_metadata(&output).map_err(|err| err.to_string())?;
-            if !meta.file_type().is_file() || meta.len() == 0 || meta.len() > MAX_WORKER_OUTPUT_BYTES {
+            if !meta.file_type().is_file()
+                || meta.len() == 0
+                || meta.len() > MAX_WORKER_OUTPUT_BYTES
+            {
                 return Err("worker output missing, unsafe or above size cap".into());
             }
             let data = fs::read(&output).map_err(|err| err.to_string())?;
             Ok(hash_bytes(&data))
-        }.await;
+        }
+        .await;
         match result {
             Ok(sha) => {
-                self.set_status(&id, JobStatus::CompletedUnverified, Some(sha), None).await;
+                self.set_status(&id, JobStatus::CompletedUnverified, Some(sha), None)
+                    .await;
             }
             Err(err) => {
-                self.set_status(&id, JobStatus::Failed, None, Some(err)).await;
+                self.set_status(&id, JobStatus::Failed, None, Some(err))
+                    .await;
             }
         }
     }
@@ -401,30 +471,52 @@ mod tests {
         std::env::temp_dir().join(format!(
             "supernode-jobs-{}-{label}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
     fn manager(root: &Path) -> Arc<JobManager> {
         let artifacts = Arc::new(ArtifactStore::new(root.join("artifacts"), 4096).unwrap());
         let core = CoreRpc::new("http://127.0.0.1:1", "user".into(), "secret".into()).unwrap();
         JobManager::new(
-            root.join("jobs"), artifacts, core,
-            Arc::new(ChainTracker::new(false)), WorkerPrograms::default(), 64, 1
-        ).unwrap()
+            root.join("jobs"),
+            artifacts,
+            core,
+            Arc::new(ChainTracker::new(false)),
+            WorkerPrograms::default(),
+            64,
+            1,
+        )
+        .unwrap()
     }
 
     #[tokio::test]
     async fn rejects_unconfigured_workers_and_invalid_memory_budgets() {
         let dir = tmp("reject");
         let jobs = manager(&dir);
-        assert!(!jobs.capabilities()["raito_worker_configured"].as_bool().unwrap());
-        assert!(jobs.submit("raito", &"00".repeat(32), 10, &"ff".repeat(32)).await.is_err());
-        assert!(jobs.submit("arbitrary_binary", &"00".repeat(32), 10, &"ff".repeat(32)).await.is_err());
+        assert!(!jobs.capabilities()["raito_worker_configured"]
+            .as_bool()
+            .unwrap());
+        assert!(jobs
+            .submit("raito", &"00".repeat(32), 10, &"ff".repeat(32))
+            .await
+            .is_err());
+        assert!(jobs
+            .submit("arbitrary_binary", &"00".repeat(32), 10, &"ff".repeat(32))
+            .await
+            .is_err());
         assert!(JobManager::new(
-            dir.join("other"), Arc::new(ArtifactStore::new(dir.join("other_artifacts"),4096).unwrap()),
-            CoreRpc::new("http://127.0.0.1:1","u".into(),"p".into()).unwrap(),
-            Arc::new(ChainTracker::new(false)), WorkerPrograms::default(), 0, 1
-        ).is_err());
+            dir.join("other"),
+            Arc::new(ArtifactStore::new(dir.join("other_artifacts"), 4096).unwrap()),
+            CoreRpc::new("http://127.0.0.1:1", "u".into(), "p".into()).unwrap(),
+            Arc::new(ChainTracker::new(false)),
+            WorkerPrograms::default(),
+            0,
+            1
+        )
+        .is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -433,12 +525,20 @@ mod tests {
         let dir = tmp("recovery");
         let jobs = manager(&dir);
         let record = JobRecord {
-            id: "ab".repeat(32), kind: JobKind::Raito,
-            input_artifact_id:"cd".repeat(32), network:"regtest".into(),
-            block_hash:"ef".repeat(32), block_height:1, chain_epoch:0,
-            policy_sha256:"12".repeat(32), estimated_memory_mib:16,
-            status:JobStatus::Running, result_sha256:None, error:None,
-            submitted_unix:1, finished_unix:None
+            id: "ab".repeat(32),
+            kind: JobKind::Raito,
+            input_artifact_id: "cd".repeat(32),
+            network: "regtest".into(),
+            block_hash: "ef".repeat(32),
+            block_height: 1,
+            chain_epoch: 0,
+            policy_sha256: "12".repeat(32),
+            estimated_memory_mib: 16,
+            status: JobStatus::Running,
+            result_sha256: None,
+            error: None,
+            submitted_unix: 1,
+            finished_unix: None,
         };
         atomic_json(&jobs.root, &record).unwrap();
         let restarted = manager(&dir);

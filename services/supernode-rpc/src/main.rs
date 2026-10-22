@@ -1,9 +1,9 @@
 //! Locally bound authenticated Bitcoin Core RPC superset.
 use rust_bitcoin_supernode_rpc::cache::{ArtifactStore, MAX_STORE_BYTES};
-use rust_bitcoin_supernode_rpc::jobs::{JobManager, WorkerPrograms};
 use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
 };
+use rust_bitcoin_supernode_rpc::jobs::{JobManager, WorkerPrograms};
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use std::sync::Arc;
 use std::{env, error::Error, net::SocketAddr};
@@ -57,16 +57,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(path) = env::var("SUPERNODE_JOB_DIR") {
         let store = artifacts.ok_or("proof jobs require SUPERNODE_ARTIFACT_DIR")?;
         let budget: u32 = env::var("SUPERNODE_PROOF_MEMORY_MIB")
-            .unwrap_or_else(|_| "4096".into()).parse()?;
+            .unwrap_or_else(|_| "4096".into())
+            .parse()?;
         let workers: usize = env::var("SUPERNODE_PROOF_WORKERS")
-            .unwrap_or_else(|_| "1".into()).parse()?;
+            .unwrap_or_else(|_| "1".into())
+            .parse()?;
         let backend = WorkerPrograms {
             raito: env::var("SUPERNODE_RAITO_PROVER").ok().map(Into::into),
             shinigami: env::var("SUPERNODE_SHINIGAMI_PROVER").ok().map(Into::into),
         };
         let manager = JobManager::new(
-            path.into(), store, core.clone(), tracker.clone(),
-            backend, budget, workers,
+            path.into(),
+            store,
+            core.clone(),
+            tracker.clone(),
+            backend,
+            budget,
+            workers,
         )?;
         gateway = gateway.with_job_manager(manager);
     }
