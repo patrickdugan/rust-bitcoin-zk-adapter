@@ -71,6 +71,33 @@ This is separate from protocol activation and TradeLayer state replay.
 cargo run --bin verify_litecoin_claim -- PATH_TO_EVIDENCE_JSON
 ```
 
+## Export Litecoin testnet evidence from a local node
+
+The [standard-library Python exporter](scripts/export_litecoin_testnet.py)
+uses **Litecoin Core testnet JSON-RPC** with a pinned testnet genesis hash,
+fetches a block by height, retrieves its ordered transaction IDs and
+computes the Merkle branch of the target transaction. The resulting JSON
+can be independently checked by the Rust verifier.
+
+```sh
+export LITECOIN_RPC_USER=your_rpc_user
+export LITECOIN_RPC_PASSWORD=your_rpc_password
+python3 scripts/export_litecoin_testnet.py \
+    --height 3496378 \
+    --txid bc395db7a7a11b42e9711e192a860da2fffe64955cae6dd673e267532f328b3d \
+    --out testnet_evidence.json
+cargo run --bin verify_litecoin_claim -- testnet_evidence.json
+```
+
+The height and txid above come from the JavaScript decoder test and remain
+**unverified until the exporter succeeds against a Litecoin Core node**.
+The exporter fails when the node's active chain differs from the expected
+testnet genesis or the transaction is absent from the specified block.
+
+Set `--cookie-file` to use Litecoin Core's RPC cookie in place of environment
+credentials. RPC access defaults to loopback; remote RPC requires both
+explicit permission and HTTPS. Never commit RPC credentials.
+
 ## Proposed evolution
 
 1. Extend the corpus with real TradeLayer transactions from each supported chain, including accepted/rejected examples, prevouts and documented activation heights.
