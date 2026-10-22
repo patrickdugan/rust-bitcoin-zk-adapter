@@ -713,7 +713,10 @@ impl JobManager {
 
     pub async fn verified_receipt(&self, id: &str) -> Result<Value, String> {
         let record = self.status(id).await?;
-        if !matches!(record.status, JobStatus::VerifiedRaito | JobStatus::OutputEvicted) {
+        if !matches!(
+            record.status,
+            JobStatus::VerifiedRaito | JobStatus::OutputEvicted
+        ) {
             return Err("job does not have a verified Raito status".into());
         }
         let receipt = record
@@ -1186,9 +1189,7 @@ mod tests {
         assert_eq!(records[&id].status, JobStatus::OutputEvicted);
         assert!(records[&id].result_bytes.is_none());
         assert_eq!(records[&id].verified_raito.as_ref(), Some(&receipt));
-        assert!(receipt
-            .validate(&records[&id], &hash_bytes(bytes))
-            .is_ok());
+        assert!(receipt.validate(&records[&id], &hash_bytes(bytes)).is_ok());
         assert!(!directory.join(format!("{id}.output")).exists());
 
         let reloaded: JobRecord =
