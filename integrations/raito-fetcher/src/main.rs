@@ -282,6 +282,7 @@ async fn fetch(args: &WorkerArgs, config: &FetchConfig) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    supernode_cgroup_guard::enforce_optional_memory_limit()?;
     let args = parse_args(env::args().skip(1))?;
     let path = PathBuf::from(env::var("SUPERNODE_RAITO_FETCH_CONFIG")?);
     let config = operator_config(&path)?;

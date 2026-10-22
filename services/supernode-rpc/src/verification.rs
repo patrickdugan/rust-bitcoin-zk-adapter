@@ -84,24 +84,27 @@ impl RaitoVerifier {
         }
 
         let result = async {
-            let status = timeout(
-                VERIFICATION_TIMEOUT,
-                Command::new(&self.executable)
-                    .arg("--gateway")
-                    .arg(&output)
-                    .arg(txid)
-                    .arg(&record.block_hash)
-                    .arg(record.block_height.to_string())
-                    .arg(&record.policy_sha256)
-                    .arg(&receipt_path)
-                    .env_clear()
-                    .env("PATH", "/usr/bin:/bin")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .kill_on_drop(true)
-                    .status(),
-            )
+            let mut command = Command::new(&self.executable);
+            command
+                .arg("--gateway")
+                .arg(&output)
+                .arg(txid)
+                .arg(&record.block_hash)
+                .arg(record.block_height.to_string())
+                .arg(&record.policy_sha256)
+                .arg(&receipt_path)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            // Forward only the operator-selected cgroup preflight gate.
+            // An unrecognized/non-Unicode value fails closed in the worker.
+            if let Some(limit) = std::env::var_os("SUPERNODE_REQUIRE_CGROUP_MAX_MIB") {
+                command.env("SUPERNODE_REQUIRE_CGROUP_MAX_MIB", limit);
+            }
+            let status = timeout(VERIFICATION_TIMEOUT, command.status())
             .await
             .map_err(|_| "Raito verifier exceeded execution timeout".to_string())?
             .map_err(|e| e.to_string())?;

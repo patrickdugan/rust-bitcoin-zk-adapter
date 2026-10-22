@@ -33,6 +33,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if !bind.ip().is_loopback() {
         return Err("Supernode v0.1 must bind to loopback".into());
     }
+    if let Some(raw) = env::var_os("SUPERNODE_REQUIRE_CGROUP_MAX_MIB") {
+        let limit: u32 = raw.into_string()
+            .map_err(|_| "invalid cgroup MiB limit encoding")?
+            .parse()?;
+        if !(128..=32_768).contains(&limit) {
+            return Err("cgroup MiB limit outside permitted range".into());
+        }
+    }
     let token = env::var("SUPERNODE_RPC_TOKEN")?;
     let max_inflight = env::var("SUPERNODE_MAX_INFLIGHT")
         .unwrap_or_else(|_| "4".into())

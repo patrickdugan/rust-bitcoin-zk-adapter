@@ -13,6 +13,7 @@ const STATEMENT: &str = "raito_spv_transaction_inclusion_v1";
 /// Machine mode is invoked only by an operator-configured gateway. Its
 /// report is emitted after real Cairo/STWO verification with dev=false.
 async fn gateway(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    supernode_cgroup_guard::enforce_optional_memory_limit()?;
     let path = PathBuf::from(args.next().ok_or("missing proof path")?);
     let expected_txid = Txid::from_str(&args.next().ok_or("missing TXID")?)?;
     let expected_block_hash = BlockHash::from_str(&args.next().ok_or("missing block hash")?)?;

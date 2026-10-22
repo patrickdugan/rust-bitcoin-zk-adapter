@@ -84,3 +84,21 @@ process need not kill its descendants. The existing job scheduler's MiB
 reservation is admission accounting and the 256 MiB retention cap applies
 only after execution. Raito upstream itself still labels the technology
 experimental.
+
+### Linux memory and swap preflight
+
+Set `SUPERNODE_REQUIRE_CGROUP_MAX_MIB=4096` on the gateway if an operator
+has already installed a **cgroup v2** memory limit for the worker processes.
+The gateway forwards this value to the separately compiled Raito fetcher and
+verifier, which both fail closed if their effective inherited cgroup ancestry
+does not expose a finite `memory.max` at or below that budget together with
+`memory.swap.max=0`. The verifier performs the check before decoding any
+proof.
+
+This check verifies an existing Linux kernel boundary. It does not create
+cgroups, move processes, or provide worker isolation by itself. Configure
+a systemd scope or container cgroup with a limit encompassing descendants of
+the Raito fetch client and STARK verifier. An unset environment variable
+keeps compatibility with development and CI; production must use explicit
+hard limits. The gateway capability response continues to state that a
+hard OS memory limit is not enforced by the gateway itself.

@@ -89,3 +89,21 @@ worker or a future bounded streaming/import interface. The bridge's
 availability, supported heights and proof policy must be confirmed in the
 actual deployment. Record peak RSS and wall clock time for the independent
 prover and verifier before assigning production resource limits.
+
+### Linux memory and swap preflight
+
+Set `SUPERNODE_REQUIRE_CGROUP_MAX_MIB=4096` on the gateway if an operator
+has already installed a **cgroup v2** memory limit for the worker processes.
+The gateway forwards this value to the separately compiled Raito fetcher and
+verifier, which both fail closed if their effective inherited cgroup ancestry
+does not expose a finite `memory.max` at or below that budget together with
+`memory.swap.max=0`. The verifier performs the check before decoding any
+proof.
+
+This check verifies an existing Linux kernel boundary. It does not create
+cgroups, move processes, or provide worker isolation by itself. Configure
+a systemd scope or container cgroup with a limit encompassing descendants of
+the Raito fetch client and STARK verifier. An unset environment variable
+keeps compatibility with development and CI; production must use explicit
+hard limits. The gateway capability response continues to state that a
+hard OS memory limit is not enforced by the gateway itself.

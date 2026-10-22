@@ -916,6 +916,9 @@ impl JobManager {
                 if let Some(ref config) = self.raito_fetch_config {
                     cmd.env("SUPERNODE_RAITO_FETCH_CONFIG", config);
                 }
+                if let Some(limit) = std::env::var_os("SUPERNODE_REQUIRE_CGROUP_MAX_MIB") {
+                    cmd.env("SUPERNODE_REQUIRE_CGROUP_MAX_MIB", limit);
+                }
             }
 
             let status = timeout(MAX_WORKER_DURATION, cmd.status())

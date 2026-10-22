@@ -261,3 +261,21 @@ replaying the expensive verifier. Legacy completed outputs remain unverified
 until an independent verifier accepts them.
 
 In-flight `verifying_raito` outputs are pinned against completed-result quota eviction until the verifier finishes. These temporary files still count toward the quota; a sweep evicts older completed outputs first. The maximum number of active worker slots is four and each proof output is capped at 64 MiB. A hard disk quota is still required for workers while they write their outputs.
+
+### Linux memory and swap preflight
+
+Set `SUPERNODE_REQUIRE_CGROUP_MAX_MIB=4096` on the gateway if an operator
+has already installed a **cgroup v2** memory limit for the worker processes.
+The gateway forwards this value to the separately compiled Raito fetcher and
+verifier, which both fail closed if their effective inherited cgroup ancestry
+does not expose a finite `memory.max` at or below that budget together with
+`memory.swap.max=0`. The verifier performs the check before decoding any
+proof.
+
+This check verifies an existing Linux kernel boundary. It does not create
+cgroups, move processes, or provide worker isolation by itself. Configure
+a systemd scope or container cgroup with a limit encompassing descendants of
+the Raito fetch client and STARK verifier. An unset environment variable
+keeps compatibility with development and CI; production must use explicit
+hard limits. The gateway capability response continues to state that a
+hard OS memory limit is not enforced by the gateway itself.
