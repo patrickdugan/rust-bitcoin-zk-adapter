@@ -1010,7 +1010,7 @@ mod tests {
         let core = CoreRpc::new(&upstream, "testuser".into(), "testpass".into()).unwrap();
         let gateway = Gateway::new(core, "0123456789abcdefTEST".into(), 4)
             .unwrap()
-            .with_control_token("CONTROL-012345678901234567890")
+            .with_control_token("CONTROL-012345678901234567890".into())
             .unwrap()
             .with_artifact_store(store)
             .with_chain_tracker(tracker.clone());
