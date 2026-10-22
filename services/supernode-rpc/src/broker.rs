@@ -297,7 +297,9 @@ mod tests {
             peer.read_exact(&mut input).await.unwrap();
             assert_eq!(input, b"input-manifest");
             write_header(&mut peer, &reply).await.unwrap();
-            peer.write_all(&payload[..16]).await.unwrap();
+            peer.write_all(&payload[..TRANSFER_CHUNK_BYTES])
+                .await
+                .unwrap();
             // A malicious broker stalls after opening the gateway output.
             std::future::pending::<()>().await;
         });
@@ -310,7 +312,7 @@ mod tests {
         });
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if std::fs::metadata(&output).is_ok_and(|m| m.len() >= 16) {
+                if std::fs::metadata(&output).is_ok_and(|m| m.len() >= TRANSFER_CHUNK_BYTES as u64) {
                     break;
                 }
                 tokio::task::yield_now().await;
