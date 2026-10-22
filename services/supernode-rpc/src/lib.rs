@@ -242,7 +242,7 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
 /// A read credential never authorizes persistent local writes or launching
 /// high-memory proving workers. These methods require the control credential.
 pub fn requires_control_token(method: &str) -> bool {
-    matches!(method, "zk.artifact.put" | "zk.proof.submit")
+    matches!(method, "zk.artifact.put" | "zk.proof.submit" | "zk.proof.verify")
 }
 
 fn error_reply(id: Value, code: i64, message: impl Into<String>) -> Value {
@@ -374,6 +374,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
         "zk.artifact.get" => get_artifact(gateway, &params).await,
         "zk.proof.submit" => submit_proof_job(gateway, &params).await,
         "zk.proof.status" => proof_job_status(gateway, &params).await,
+        "zk.proof.verify" => proof_job_verify(gateway, &params).await,
         "zk.proof.receipt" => proof_job_receipt(gateway, &params).await,
         "zk.proof.get" => proof_job_get(gateway, &params).await,
         "zk.chain.refresh" => gateway
@@ -831,6 +832,27 @@ async fn proof_job_get(gateway: &Gateway, params: &Value) -> Result<Value, RpcEr
         .result_chunk(id, offset, length)
         .await
         .map_err(|error| RpcError::new(-32042, error))
+}
+
+async fn proof_job_verify(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
+    let manager = gateway
+        .jobs
+        .as_ref()
+        .ok_or_else(|| RpcError::new(-32601, "proof job dispatcher not configured"))?;
+    let args = params
+        .as_array()
+        .ok_or_else(|| RpcError::new(-32602, "expected [job_id]"))?;
+    if args.len() != 1 {
+        return Err(RpcError::new(-32602, "expected [job_id]"));
+    }
+    let id = args[0]
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32602, "invalid job ID"))?;
+    let job = manager
+        .retry_verification(id)
+        .await
+        .map_err(|error| RpcError::new(-32044, error))?;
+    Ok(json!({"job":job,"note":"Verification scheduled against pinned Raito policy"}))
 }
 
 async fn proof_job_receipt(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {

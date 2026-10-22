@@ -279,3 +279,19 @@ the Raito fetch client and STARK verifier. An unset environment variable
 keeps compatibility with development and CI; production must use explicit
 hard limits. The gateway capability response continues to state that a
 hard OS memory limit is not enforced by the gateway itself.
+
+### Retry verification without repeating proof generation
+
+`zk.proof.verify [job_id]` requires the **control token**. It schedules
+verification of an existing `completed_unverified` Raito proof whose original
+job record contains an expected TXID and SHA-256. The dispatcher checks the
+entire retained output digest before admitting work, rechecks Bitcoin Core
+chain placement, and enters `verifying_raito` atomically. The separately
+pinned verifier runs with the same admission and worker-slot budgets as a
+fresh proof. A verifier failure returns the result to
+`completed_unverified`, retaining its original content digest and error for
+inspection. Concurrent or duplicate verification requests are rejected.
+
+The method is designed for recovery after the gateway restarts mid-verification
+or when an operator fixes a policy/configuration problem. A fully evicted
+output must be regenerated or independently restored before verification.

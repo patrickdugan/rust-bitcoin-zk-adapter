@@ -529,6 +529,7 @@ impl JobManager {
             "raito_verifier_configured":self.raito_verifier.is_some(),
             "raito_fetch_configured":self.raito_fetch_config.is_some(),
             "typed_raito_receipts_enabled":self.raito_verifier.is_some(),
+            "verification_retry_available":self.raito_verifier.is_some(),
             "shinigami_worker_configured":self.workers.enabled(&JobKind::Shinigami),
             "max_pending":MAX_PENDING_JOBS,
             "max_worker_count":self.worker_count,
@@ -725,6 +726,111 @@ impl JobManager {
                 prune_result_files(&self.root, &mut records, MAX_RETAINED_RESULT_BYTES)
             {
                 eprintln!("Could not enforce proof output retention quota: {err}");
+            }
+        }
+    }
+
+    /// Verify the retained output without re-running an expensive prover.
+    /// A fresh RPC submission is never able to claim verification by itself.
+    pub async fn retry_verification(self: &Arc<Self>, id: &str) -> Result<JobRecord, String> {
+        if self.raito_verifier.is_none() {
+            return Err("Raito verifier is not configured".into());
+        }
+        let queue_permit = self
+            .queue_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "proof verification queue capacity exhausted")?;
+        let original = self.status(id).await?;
+        if original.kind != JobKind::Raito
+            || original.expected_txid.is_none()
+            || original.status != JobStatus::CompletedUnverified
+        {
+            return Err("only retained unverified Raito jobs with an expected TXID can be retried".into());
+        }
+        let digest = original
+            .result_sha256
+            .as_deref()
+            .ok_or("job lacks a persisted result digest")?;
+        self.check_chain(&original).await?;
+        let path = self.root.join(format!("{id}.output"));
+        let (actual, size, _) = checked_result_digest(&path)?;
+        if digest != actual || original.result_bytes.is_some_and(|n| n != size) {
+            return Err("retained output differs from the persisted digest or size".into());
+        }
+        let mut updated = original.clone();
+        updated.status = JobStatus::VerifyingRaito;
+        updated.error = None;
+        updated.finished_unix = None;
+        {
+            let mut state = self.records.lock().await;
+            if state.get(id).is_none_or(|record| record.status != JobStatus::CompletedUnverified) {
+                return Err("proof verification is already running or the job changed".into());
+            }
+            atomic_json(&self.root, &updated)?;
+            state.insert(id.to_owned(), updated.clone());
+        }
+        let manager = Arc::clone(self);
+        let id = id.to_owned();
+        let digest = actual;
+        tokio::spawn(async move {
+            let _permit = queue_permit;
+            if let Err(error) = manager
+                .verify_existing_record(&original, &digest, size)
+                .await
+            {
+                manager.mark_verification_failed(&id, error).await;
+            }
+        });
+        Ok(updated)
+    }
+
+    /// One shared verification path for freshly produced and retained proof
+    /// bytes. Both cases consume the same admission/worker-slot semaphores.
+    async fn verify_existing_record(
+        &self,
+        record: &JobRecord,
+        digest: &str,
+        size: u64,
+    ) -> Result<(), String> {
+        let verifier = self
+            .raito_verifier
+            .as_ref()
+            .ok_or("Raito verifier is not configured")?;
+        let _memory = self
+            .memory
+            .clone()
+            .acquire_many_owned(record.estimated_memory_mib)
+            .await
+            .map_err(|error| error.to_string())?;
+        let _slot = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| error.to_string())?;
+        self.check_chain(record).await?;
+        let report = verifier.verify(&self.root, record, digest).await?;
+        let path = self.root.join(format!("{}.output", record.id));
+        let (actual, actual_size, _) = checked_result_digest(&path)?;
+        if actual != digest || actual_size != size {
+            return Err("proof output changed during Raito verification".into());
+        }
+        self.check_chain(record).await?;
+        self.publish_raito_verified(&record.id, report).await
+    }
+
+    async fn mark_verification_failed(&self, id: &str, error: String) {
+        let mut state = self.records.lock().await;
+        if let Some(current) = state
+            .get_mut(id)
+            .filter(|record| record.status == JobStatus::VerifyingRaito)
+        {
+            current.status = JobStatus::CompletedUnverified;
+            current.finished_unix = Some(unix_time());
+            current.error = Some(format!("Raito verification: {error}"));
+            if let Err(error) = atomic_json(&self.root, current) {
+                eprintln!("Could not persist verification failure: {error}");
             }
         }
     }
@@ -959,48 +1065,10 @@ impl JobManager {
                 )
                 .await;
                 if should_verify {
-                    if let (Some(verifier), Some(_)) =
-                        (&self.raito_verifier, record.expected_txid.as_ref())
-                    {
-                        let verification = async {
-                            let _memory = self
-                                .memory
-                                .clone()
-                                .acquire_many_owned(record.estimated_memory_mib)
-                                .await
-                                .map_err(|err| err.to_string())?;
-                            let _slot = self
-                                .slots
-                                .clone()
-                                .acquire_owned()
-                                .await
-                                .map_err(|err| err.to_string())?;
-                            self.check_chain(&record).await?;
-                            let report = verifier.verify(&self.root, &record, &digest).await?;
-                            let (actual, actual_size, _) = checked_result_digest(&output_path)?;
-                            if actual != digest || actual_size != size {
-                                return Err("proof output changed during Raito verification".into());
-                            }
-                            self.check_chain(&record).await?;
-                            self.publish_raito_verified(&id, report).await
-                        }
-                        .await;
-                        if let Err(err) = verification {
-                            // The raw proof remains available for inspection,
-                            // always labeled unverified. Never trust prover bytes.
-                            let mut state = self.records.lock().await;
-                            if let Some(current) = state
-                                .get_mut(&id)
-                                .filter(|r| r.status == JobStatus::VerifyingRaito)
-                            {
-                                current.status = JobStatus::CompletedUnverified;
-                                current.finished_unix = Some(unix_time());
-                                current.error = Some(format!("Raito verification: {err}"));
-                                if let Err(e) = atomic_json(&self.root, current) {
-                                    eprintln!("Could not persist verification error: {e}");
-                                }
-                            }
-                        }
+                    if let Err(error) = self.verify_existing_record(&record, &digest, size).await {
+                        // Retained output remains available for later verification
+                        // attempts while its statement is explicitly unverified.
+                        self.mark_verification_failed(&id, error).await;
                     }
                 }
             }
