@@ -1296,7 +1296,6 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-
     #[cfg(unix)]
     #[tokio::test]
     async fn full_dispatch_mock_raito_receipt_is_typed_and_reorg_checked() {
@@ -1409,8 +1408,10 @@ mod tests {
                 let job = manager.status(&started.id).await.unwrap();
                 if matches!(
                     job.status,
-                    JobStatus::VerifiedRaito | JobStatus::Failed
-                        | JobStatus::CompletedUnverified | JobStatus::OutputEvicted
+                    JobStatus::VerifiedRaito
+                        | JobStatus::Failed
+                        | JobStatus::CompletedUnverified
+                        | JobStatus::OutputEvicted
                 ) {
                     break job;
                 }
@@ -1419,14 +1420,22 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(finished.status, JobStatus::VerifiedRaito, "{:?}", finished.error);
+        assert_eq!(
+            finished.status,
+            JobStatus::VerifiedRaito,
+            "{:?}",
+            finished.error
+        );
         assert_eq!(finished.verified_raito.as_ref(), Some(&receipt));
         let published = manager.verified_receipt(&started.id).await.unwrap();
         assert_eq!(published["proof_verified"], true);
         assert_eq!(published["verified_statement"]["txid"], expected_txid);
         let part = manager.result_chunk(&started.id, 0, 20).await.unwrap();
         assert_eq!(part["proof_verified"], true);
-        assert_eq!(hex::decode(part["data_hex"].as_str().unwrap()).unwrap(), &content[..20]);
+        assert_eq!(
+            hex::decode(part["data_hex"].as_str().unwrap()).unwrap(),
+            &content[..20]
+        );
 
         // Receipt survives a gateway restart with a new in-memory job map.
         let reopened = JobManager::new(
@@ -1439,7 +1448,10 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(reopened.verified_receipt(&started.id).await.unwrap()["proof_verified"], true);
+        assert_eq!(
+            reopened.verified_receipt(&started.id).await.unwrap()["proof_verified"],
+            true
+        );
 
         let mut tampered = finished.clone();
         tampered.verified_raito.as_mut().unwrap().txid = "cd".repeat(32);
