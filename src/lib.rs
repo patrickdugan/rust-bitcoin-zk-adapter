@@ -8,6 +8,8 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::{Block, Txid};
 
 pub mod op_return;
+pub mod compat;
+pub mod replay;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {

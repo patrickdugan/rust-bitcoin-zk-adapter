@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "type2_direct",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txEncoder.js",
+      "script_hex": "6a0a746c32303b3b7a3b3273",
+      "expected_strict": {
+        "kind": "envelope",
+        "tx_type": 2,
+        "body": "0;;z;2s"
+      },
+      "expected_legacy": {
+        "kind": "payload",
+        "payload": "20;;z;2s"
+      }
+    },
+    {
+      "id": "type2_pushdata1",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a4c0a746c32303b3b7a3b3273",
+      "expected_strict": {
+        "kind": "envelope",
+        "tx_type": 2,
+        "body": "0;;z;2s"
+      },
+      "expected_legacy": {
+        "kind": "payload",
+        "payload": "20;;z;2s"
+      }
+    },
+    {
+      "id": "type35_base36",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/types.js",
+      "script_hex": "6a08746c7a312c322c33",
+      "expected_strict": {
+        "kind": "envelope",
+        "tx_type": 35,
+        "body": "1,2,3"
+      },
+      "expected_legacy": {
+        "kind": "payload",
+        "payload": "z1,2,3"
+      }
+    },
+    {
+      "id": "duplicate_marker_synthetic",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/types.js",
+      "script_hex": "6a15746c31746c31612c434f494e2c2c302c2c302c302c",
+      "expected_strict": {
+        "kind": "envelope",
+        "tx_type": 1,
+        "body": "tl1a,COIN,,0,,0,0,"
+      },
+      "expected_legacy": {
+        "kind": "payload",
+        "payload": "1tl1a,COIN,,0,,0,0,"
+      }
+    },
+    {
+      "id": "embedded_marker",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a06787878746c32",
+      "expected_strict": {
+        "kind": "ignored"
+      },
+      "expected_legacy": {
+        "kind": "ignored"
+      }
+    },
+    {
+      "id": "truncated_pushdata1",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a4c02",
+      "expected_strict": {
+        "kind": "error",
+        "code": "TruncatedData"
+      },
+      "expected_legacy": {
+        "kind": "ignored"
+      }
+    },
+    {
+      "id": "nonprintable",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a04746c3200",
+      "expected_strict": {
+        "kind": "error",
+        "code": "NonPrintablePayload"
+      },
+      "expected_legacy": {
+        "kind": "ignored"
+      }
+    },
+    {
+      "id": "marker_without_type",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a02746c",
+      "expected_strict": {
+        "kind": "error",
+        "code": "MissingTransactionType"
+      },
+      "expected_legacy": {
+        "kind": "payload",
+        "payload": ""
+      }
+    },
+    {
+      "id": "nonpush_opcode",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a51",
+      "expected_strict": {
+        "kind": "error",
+        "code": "UnsupportedOpcode(81)"
+      },
+      "expected_legacy": {
+        "kind": "ignored"
+      }
+    },
+    {
+      "id": "split_pushes",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a02746c0332303b037a3b32",
+      "expected_strict": {
+        "kind": "envelope",
+        "tx_type": 2,
+        "body": "0;z;2"
+      },
+      "expected_legacy": {
+        "kind": "ignored"
+      }
+    },
+    {
+      "id": "zero_push_before_marker",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a0003746c32",
+      "expected_strict": {
+        "kind": "envelope",
+        "tx_type": 2,
+        "body": ""
+      },
+      "expected_legacy": {
+        "kind": "payload",
+        "payload": "2"
+      }
+    },
+    {
+      "id": "uppercase_type",
+      "provenance": "synthetic",
+      "chain": "litecoin",
+      "network": "testnet",
+      "block_height": null,
+      "source_url": "https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js",
+      "script_hex": "6a03746c41",
+      "expected_strict": {
+        "kind": "error",
+        "code": "InvalidTransactionType(65)"
+      },
+      "expected_legacy": {
+        "kind": "payload",
+        "payload": "A"
+      }
+    }
+  ]
+}
