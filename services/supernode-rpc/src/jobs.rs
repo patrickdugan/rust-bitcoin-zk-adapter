@@ -591,33 +591,38 @@ mod tests {
         let rpc_url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
 
-        let cache = Arc::new(
-            ArtifactStore::new(directory.join("artifacts"), 4096).unwrap()
-        );
+        let cache = Arc::new(ArtifactStore::new(directory.join("artifacts"), 4096).unwrap());
         let content = b"synthetic-data-not-a-zk-proof";
-        let staged = cache.put(
-            "regtest",
-            &initial_hash,
-            100,
-            0,
-            "raito_input",
-            content,
-        ).await.unwrap();
+        let staged = cache
+            .put("regtest", &initial_hash, 100, 0, "raito_input", content)
+            .await
+            .unwrap();
 
         let jobs = JobManager::new(
             directory.join("jobs"),
             cache,
             CoreRpc::new(&rpc_url, "unit".into(), "test".into()).unwrap(),
             Arc::new(ChainTracker::new(false)),
-            WorkerPrograms { raito: Some(executable), shinigami: None },
+            WorkerPrograms {
+                raito: Some(executable),
+                shinigami: None,
+            },
             2,
             1,
-        ).unwrap();
-        assert!(jobs.capabilities()["raito_worker_configured"].as_bool().unwrap());
-        assert!(jobs.submit("raito", &staged.id, 3, &"dd".repeat(32)).await.is_err());
+        )
+        .unwrap();
+        assert!(jobs.capabilities()["raito_worker_configured"]
+            .as_bool()
+            .unwrap());
+        assert!(jobs
+            .submit("raito", &staged.id, 3, &"dd".repeat(32))
+            .await
+            .is_err());
 
-        let queued = jobs.submit("raito", &staged.id, 2, &"dd".repeat(32))
-            .await.unwrap();
+        let queued = jobs
+            .submit("raito", &staged.id, 2, &"dd".repeat(32))
+            .await
+            .unwrap();
         let completed = timeout(Duration::from_secs(6), async {
             loop {
                 let record = jobs.status(&queued.id).await.unwrap();
@@ -626,7 +631,9 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(completed.status, JobStatus::CompletedUnverified);
         assert_eq!(completed.result_sha256, Some(hash_bytes(content)));
 
@@ -635,16 +642,18 @@ mod tests {
 
         let restarted = JobManager::new(
             directory.join("jobs"),
-            Arc::new(ArtifactStore::new(directory.join("artifacts"),4096).unwrap()),
-            CoreRpc::new(&rpc_url,"unit".into(),"test".into()).unwrap(),
+            Arc::new(ArtifactStore::new(directory.join("artifacts"), 4096).unwrap()),
+            CoreRpc::new(&rpc_url, "unit".into(), "test".into()).unwrap(),
             Arc::new(ChainTracker::new(false)),
-            WorkerPrograms::default(), 2, 1
-        ).unwrap();
+            WorkerPrograms::default(),
+            2,
+            1,
+        )
+        .unwrap();
         assert_eq!(
             restarted.status(&queued.id).await.unwrap().status,
             JobStatus::CompletedUnverified
         );
         fs::remove_dir_all(directory).unwrap();
     }
-
 }
