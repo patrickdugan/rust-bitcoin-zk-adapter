@@ -1,0 +1,9 @@
+[package]
+name = "rust-bitcoin-zk-adapter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Independent Bitcoin OP_RETURN witness extraction and deterministic state transition prototype"
+
+[dependencies]
+bitcoin = "=0.32.102"
