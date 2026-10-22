@@ -10,6 +10,7 @@ use bitcoin::{Block, Txid};
 pub mod compat;
 pub mod op_return;
 pub mod replay;
+pub mod merkle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {

@@ -43,6 +43,18 @@ Run it with:
 The manifest also records chain, network, provenance and optional block height.
 Those metadata fields are not verified as consensus assertions.
 
+## Transaction Merkle inclusion
+
+The [Merkle verifier](src/merkle.rs) checks transaction position, sibling
+branch and tree width against the transaction Merkle root supplied by a
+Bitcoin block header. It detects incorrect odd-leaf duplication and malformed
+branches; tests include Bitcoin's genesis block.
+
+A successful branch check authenticates an inclusion claim against a given
+root. The caller must separately establish that its header is valid and on
+the intended canonical chain using Bitcoin Core. Litecoin and Dogecoin
+header validation likewise belongs to their respective full nodes.
+
 ## Proposed evolution
 
 1. Extend the corpus with real TradeLayer transactions from each supported chain, including accepted/rejected examples, prevouts and documented activation heights.
