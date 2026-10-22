@@ -105,9 +105,9 @@ impl RaitoVerifier {
                 command.env("SUPERNODE_REQUIRE_CGROUP_MAX_MIB", limit);
             }
             let status = timeout(VERIFICATION_TIMEOUT, command.status())
-            .await
-            .map_err(|_| "Raito verifier exceeded execution timeout".to_string())?
-            .map_err(|e| e.to_string())?;
+                .await
+                .map_err(|_| "Raito verifier exceeded execution timeout".to_string())?
+                .map_err(|e| e.to_string())?;
             if !status.success() {
                 return Err(format!("Raito verifier rejected proof: {status}"));
             }

@@ -746,7 +746,9 @@ impl JobManager {
             || original.expected_txid.is_none()
             || original.status != JobStatus::CompletedUnverified
         {
-            return Err("only retained unverified Raito jobs with an expected TXID can be retried".into());
+            return Err(
+                "only retained unverified Raito jobs with an expected TXID can be retried".into(),
+            );
         }
         let digest = original
             .result_sha256
@@ -764,7 +766,10 @@ impl JobManager {
         updated.finished_unix = None;
         {
             let mut state = self.records.lock().await;
-            if state.get(id).is_none_or(|record| record.status != JobStatus::CompletedUnverified) {
+            if state
+                .get(id)
+                .is_none_or(|record| record.status != JobStatus::CompletedUnverified)
+            {
                 return Err("proof verification is already running or the job changed".into());
             }
             atomic_json(&self.root, &updated)?;
@@ -1567,7 +1572,6 @@ mod tests {
             hex::decode(part["data_hex"].as_str().unwrap()).unwrap(),
             &content[..20]
         );
-
 
         // A verified job is immutable under a duplicate retry. Model the
         // restart recovery state and verify the existing proof a second time.

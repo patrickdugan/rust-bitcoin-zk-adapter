@@ -242,7 +242,10 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
 /// A read credential never authorizes persistent local writes or launching
 /// high-memory proving workers. These methods require the control credential.
 pub fn requires_control_token(method: &str) -> bool {
-    matches!(method, "zk.artifact.put" | "zk.proof.submit" | "zk.proof.verify")
+    matches!(
+        method,
+        "zk.artifact.put" | "zk.proof.submit" | "zk.proof.verify"
+    )
 }
 
 fn error_reply(id: Value, code: i64, message: impl Into<String>) -> Value {
