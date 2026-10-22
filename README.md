@@ -55,6 +55,22 @@ root. The caller must separately establish that its header is valid and on
 the intended canonical chain using Bitcoin Core. Litecoin and Dogecoin
 header validation likewise belongs to their respective full nodes.
 
+## Litecoin testnet inclusion evidence
+
+The [Litecoin testnet evidence verifier](src/evidence.rs) binds a raw
+transaction to a declared txid, the Merkle root in a supplied block header,
+the header's displayed block hash, and Litecoin Core's specific testnet
+genesis hash. It reports OP_RETURN output indices in transaction order.
+
+The cryptographic checks establish **internal consistency against supplied
+inputs**. A trusted Litecoin Core node is required to establish that the
+header and block height belong to its validated canonical testnet history.
+This is separate from protocol activation and TradeLayer state replay.
+
+```sh
+cargo run --bin verify_litecoin_claim -- PATH_TO_EVIDENCE_JSON
+```
+
 ## Proposed evolution
 
 1. Extend the corpus with real TradeLayer transactions from each supported chain, including accepted/rejected examples, prevouts and documented activation heights.

@@ -8,6 +8,7 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::{Block, Txid};
 
 pub mod compat;
+pub mod evidence;
 pub mod merkle;
 pub mod op_return;
 pub mod replay;

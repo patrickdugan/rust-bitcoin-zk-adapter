@@ -38,7 +38,16 @@ defaults. These are recorded as observed configuration values only.
 Actual type activation is tracked separately in
 [activation.js](https://github.com/patrickdugan/tradelayer.js/blob/dca0888b827c5bc28fa9189bc9e1d507f5c5670c/src/activation.js).
 
-## Candidate historical transactions awaiting authentication
+## Litecoin testnet candidate transactions awaiting authentication
+
+The indexer and decoder examples below are being investigated as Litecoin
+**testnet** transactions. Their heights must be interpreted in their own
+network context. The Litecoin mainnet tip is unrelated to testnet inclusion.
+A candidate becomes usable for historical replay once a Litecoin testnet
+node supplies block membership and transaction bytes. Our verification
+pipeline pins the Litecoin testnet genesis independently of these heights.
+
+### Candidate references
 
 - c59fd0a35bc93979133cda1ae86c235428112c153fbdabed2cbc7ea86e60543f:
   cited as a token-trade transaction at block height 3395569 in the
@@ -46,7 +55,7 @@ Actual type activation is tracked separately in
   Neither raw bytes nor block inclusion has been authenticated for this harness.
 - bc395db7a7a11b42e9711e192a860da2fffe64955cae6dd673e267532f328b3d:
   used by the [TradeLayer.js decoder test](https://github.com/patrickdugan/tradelayer.js/blob/dca0888b827c5bc28fa9189bc9e1d507f5c5670c/tests/decoderTest.js)
-  with a height of 3496378. Chain and network status remain unverified.
+  with a height of 3496378. The transaction's Litecoin testnet membership remains to be authenticated against a node.
 
 Authenticated replay requires the full raw transaction, the chain/network,
 block hash and height, transaction position, prevouts for sender resolution,
