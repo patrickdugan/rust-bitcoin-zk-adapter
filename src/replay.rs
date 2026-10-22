@@ -27,13 +27,24 @@ pub struct ReplayFixture {
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Provenance { Synthetic, SourceLinkedUnverified }
+pub enum Provenance {
+    Synthetic,
+    SourceLinkedUnverified,
+}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Chain { Bitcoin, Litecoin, Dogecoin }
+pub enum Chain {
+    Bitcoin,
+    Litecoin,
+    Dogecoin,
+}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Network { Mainnet, Testnet, Regtest }
+pub enum Network {
+    Mainnet,
+    Testnet,
+    Regtest,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StrictOutcome {
@@ -43,7 +54,10 @@ pub enum StrictOutcome {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LegacyOutcome { Payload { payload: String }, Ignored }
+pub enum LegacyOutcome {
+    Payload { payload: String },
+    Ignored,
+}
 
 /// ASCII-hex parser with bounded input and exact-length decoding.
 pub fn parse_script_hex(hex: &str) -> Result<Vec<u8>, String> {
@@ -52,8 +66,8 @@ pub fn parse_script_hex(hex: &str) -> Result<Vec<u8>, String> {
     }
     let mut script = Vec::with_capacity(hex.len() / 2);
     for index in (0..hex.len()).step_by(2) {
-        let value = u8::from_str_radix(&hex[index..index + 2], 16)
-            .map_err(|_| "invalid hex digit")?;
+        let value =
+            u8::from_str_radix(&hex[index..index + 2], 16).map_err(|_| "invalid hex digit")?;
         script.push(value);
     }
     Ok(script)
@@ -75,20 +89,19 @@ pub fn run_fixture_set(set: &FixtureSet) -> Result<usize, String> {
         {
             return Err(format!("{}: missing provenance link", case.id));
         }
-        let script = parse_script_hex(&case.script_hex)
-            .map_err(|error| format!("{}: {error}", case.id))?;
-        let strict = match decode_op_return(&script)
-            .and_then(|data| decode_tradelayer_envelope(&data))
-        {
-            Ok(Some(envelope)) => StrictOutcome::Envelope {
-                tx_type: envelope.tx_type,
-                body: envelope.body,
-            },
-            Ok(None) => StrictOutcome::Ignored,
-            Err(error) => StrictOutcome::Error {
-                code: format!("{error:?}"),
-            },
-        };
+        let script =
+            parse_script_hex(&case.script_hex).map_err(|error| format!("{}: {error}", case.id))?;
+        let strict =
+            match decode_op_return(&script).and_then(|data| decode_tradelayer_envelope(&data)) {
+                Ok(Some(envelope)) => StrictOutcome::Envelope {
+                    tx_type: envelope.tx_type,
+                    body: envelope.body,
+                },
+                Ok(None) => StrictOutcome::Ignored,
+                Err(error) => StrictOutcome::Error {
+                    code: format!("{error:?}"),
+                },
+            };
         if strict != case.expected_strict {
             return Err(format!(
                 "{}: strict expected {:?}, received {:?}",

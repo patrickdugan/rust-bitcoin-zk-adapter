@@ -3,7 +3,9 @@ use rust_bitcoin_zk_adapter::replay::{run_fixture_set, FixtureSet};
 use std::{env, error::Error, fs};
 const MAX_MANIFEST_BYTES: u64 = 2_000_000;
 fn main() -> Result<(), Box<dyn Error>> {
-    let file = env::args().nth(1).ok_or("usage: replay_fixtures PATH_TO_JSON")?;
+    let file = env::args()
+        .nth(1)
+        .ok_or("usage: replay_fixtures PATH_TO_JSON")?;
     if fs::metadata(&file)?.len() > MAX_MANIFEST_BYTES {
         return Err("manifest exceeds size limit".into());
     }

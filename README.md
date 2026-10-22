@@ -29,6 +29,20 @@ cargo run --bin inspect_tx -- fixtures/mainnet/2033435de7ce307341231e818ed937cd3
 
 This offline tool reads serialized Bitcoin transaction hex. It makes no network calls or claims about canonical-chain membership. See [fixture provenance](docs/FIXTURE_PROVENANCE.md). The TL parser is an experimental strict mode, not historical TradeLayer consensus equivalence.
 
+## Differential replay
+
+The [TradeLayer compatibility harness](docs/TRADELAYER_COMPAT.md) records how
+strict Bitcoin Script decoding and legacy TradeLayer.js marker extraction
+interpret the same input. Its synthetic fixtures include direct pushes,
+PUSHDATA1, malformed scripts, split pushes, and possible duplicate markers.
+
+Run it with:
+
+    cargo run --bin replay_fixtures -- fixtures/tradelayer/replay_v1.json
+
+The manifest also records chain, network, provenance and optional block height.
+Those metadata fields are not verified as consensus assertions.
+
 ## Proposed evolution
 
 1. Extend the corpus with real TradeLayer transactions from each supported chain, including accepted/rejected examples, prevouts and documented activation heights.
