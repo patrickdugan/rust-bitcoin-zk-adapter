@@ -168,8 +168,12 @@ impl Gateway {
     /// Operator bearer token for local disk writes and prover scheduling.
     /// Read-only Bitcoin Core queries remain accessible to the read token.
     pub fn with_control_token(mut self, token: String) -> Result<Self, String> {
-        if token.len() < 24 || constant_time_equal(token.as_bytes(), self.gateway_token.as_bytes()) {
-            return Err("control token must be at least 24 characters and distinct from the read token".into());
+        if token.len() < 24 || constant_time_equal(token.as_bytes(), self.gateway_token.as_bytes())
+        {
+            return Err(
+                "control token must be at least 24 characters and distinct from the read token"
+                    .into(),
+            );
         }
         self.control_token = Some(token);
         Ok(self)
@@ -264,10 +268,14 @@ async fn rpc(
     let read_authorized = token
         .is_some_and(|token| constant_time_equal(token.as_bytes(), state.gateway_token.as_bytes()));
     let control_authorized = token
-        .and_then(|token| state.control_token.as_deref().map(|control| (token, control)))
+        .and_then(|token| {
+            state
+                .control_token
+                .as_deref()
+                .map(|control| (token, control))
+        })
         .is_some_and(|(token, control)| constant_time_equal(token.as_bytes(), control.as_bytes()));
-    if !read_authorized && !control_authorized
-    {
+    if !read_authorized && !control_authorized {
         return (
             StatusCode::UNAUTHORIZED,
             Json(error_reply(
@@ -1060,7 +1068,10 @@ mod tests {
     fn control_token_must_not_reuse_read_token() {
         let core = CoreRpc::new("http://127.0.0.1:1", "u".into(), "p".into()).unwrap();
         let gateway = Gateway::new(core, "0123456789abcdefTEST".into(), 2).unwrap();
-        assert!(gateway.clone().with_control_token("0123456789abcdefTEST".into()).is_err());
+        assert!(gateway
+            .clone()
+            .with_control_token("0123456789abcdefTEST".into())
+            .is_err());
         assert!(gateway.with_control_token("short".into()).is_err());
     }
 
