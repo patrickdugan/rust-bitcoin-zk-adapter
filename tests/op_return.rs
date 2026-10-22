@@ -16,7 +16,10 @@ fn all_push_types_preserve_payload() {
         assert_eq!(data, expected);
         assert_eq!(
             decode_tradelayer_envelope(&data).unwrap(),
-            Some(TradeLayerEnvelope { tx_type: 2, body: "0;;z;2s".into() })
+            Some(TradeLayerEnvelope {
+                tx_type: 2,
+                body: "0;;z;2s".into()
+            })
         );
     }
 }
@@ -34,19 +37,28 @@ fn marker_must_be_at_payload_start() {
     let data = decode_op_return(b"\x6a\x06xxxtl2").unwrap();
     assert_eq!(decode_tradelayer_envelope(&data).unwrap(), None);
     assert_eq!(decode_tradelayer_envelope(b"omni2").unwrap(), None);
-    assert_eq!(decode_tradelayer_envelope(b"tl"), Err(DecodeError::MissingTransactionType));
-    assert_eq!(decode_tradelayer_envelope(b"tlAfoo"), Err(DecodeError::InvalidTransactionType(b'A')));
-    assert_eq!(decode_tradelayer_envelope(b"tl2\x00bad"), Err(DecodeError::NonPrintablePayload));
+    assert_eq!(
+        decode_tradelayer_envelope(b"tl"),
+        Err(DecodeError::MissingTransactionType)
+    );
+    assert_eq!(
+        decode_tradelayer_envelope(b"tlAfoo"),
+        Err(DecodeError::InvalidTransactionType(b'A'))
+    );
+    assert_eq!(
+        decode_tradelayer_envelope(b"tl2\x00bad"),
+        Err(DecodeError::NonPrintablePayload)
+    );
 }
 #[test]
 fn malformed_scripts_fail_closed() {
     let cases = [
-        (vec![0x00,0x6a,0x01,b'x'], DecodeError::NotOpReturn),
-        (vec![0x6a,0x4c], DecodeError::TruncatedLength),
-        (vec![0x6a,0x4d,0x01], DecodeError::TruncatedLength),
-        (vec![0x6a,0x4e,0x01,0,0], DecodeError::TruncatedLength),
-        (vec![0x6a,0x03,b't',b'l'], DecodeError::TruncatedData),
-        (vec![0x6a,0x51], DecodeError::UnsupportedOpcode(0x51)),
+        (vec![0x00, 0x6a, 0x01, b'x'], DecodeError::NotOpReturn),
+        (vec![0x6a, 0x4c], DecodeError::TruncatedLength),
+        (vec![0x6a, 0x4d, 0x01], DecodeError::TruncatedLength),
+        (vec![0x6a, 0x4e, 0x01, 0, 0], DecodeError::TruncatedLength),
+        (vec![0x6a, 0x03, b't', b'l'], DecodeError::TruncatedData),
+        (vec![0x6a, 0x51], DecodeError::UnsupportedOpcode(0x51)),
     ];
     for (script, expected) in cases {
         assert_eq!(decode_op_return(&script), Err(expected));
@@ -54,16 +66,19 @@ fn malformed_scripts_fail_closed() {
 }
 #[test]
 fn resource_guards_trigger() {
-    let mut huge = vec![0x6a,0x4e];
+    let mut huge = vec![0x6a, 0x4e];
     huge.extend_from_slice(&100_001u32.to_le_bytes());
     assert_eq!(decode_op_return(&huge), Err(DecodeError::DataTooLarge));
     let mut pushes = vec![0x6a];
-    pushes.extend_from_slice(&[0;1_025]);
+    pushes.extend_from_slice(&[0; 1_025]);
     assert_eq!(decode_op_return(&pushes), Err(DecodeError::TooManyPushes));
-    assert_eq!(decode_op_return(&vec![0x6a;100_001]), Err(DecodeError::ScriptTooLarge));
+    assert_eq!(
+        decode_op_return(&vec![0x6a; 100_001]),
+        Err(DecodeError::ScriptTooLarge)
+    );
 }
 #[test]
 fn empty_op_return() {
     assert_eq!(decode_op_return(&[0x6a]).unwrap(), Vec::<u8>::new());
-    assert_eq!(decode_op_return(&[0x6a,0]).unwrap(), Vec::<u8>::new());
+    assert_eq!(decode_op_return(&[0x6a, 0]).unwrap(), Vec::<u8>::new());
 }

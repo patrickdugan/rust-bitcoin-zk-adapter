@@ -6,17 +6,25 @@ use std::{env, error::Error, fs, io};
 
 const MAX_INPUT_HEX_BYTES: u64 = 8_000_000;
 fn parse_hex(source: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let hex: String = source.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let hex: String = source
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
     if hex.len() % 2 != 0 {
         return Err("odd number of hex digits".into());
     }
-    hex.as_bytes().chunks_exact(2).map(|chunk| {
-        let ascii = std::str::from_utf8(chunk)?;
-        Ok(u8::from_str_radix(ascii, 16)?)
-    }).collect::<Result<Vec<_>, Box<dyn Error>>>()
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let ascii = std::str::from_utf8(chunk)?;
+            Ok(u8::from_str_radix(ascii, 16)?)
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = env::args().nth(1).ok_or("usage: inspect_tx PATH_TO_RAW_TX_HEX")?;
+    let path = env::args()
+        .nth(1)
+        .ok_or("usage: inspect_tx PATH_TO_RAW_TX_HEX")?;
     if fs::metadata(&path)?.len() > MAX_INPUT_HEX_BYTES {
         return Err("transaction hex file exceeds inspection size limit".into());
     }
@@ -30,7 +38,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let data = decode_op_return(output.script_pubkey.as_bytes())?;
             println!("  vout {vout}: OP_RETURN, {} payload bytes", data.len());
             match decode_tradelayer_envelope(&data)? {
-                Some(tl) => println!("    TradeLayer syntax: type={}, body={:?}", tl.tx_type, tl.body),
+                Some(tl) => println!(
+                    "    TradeLayer syntax: type={}, body={:?}",
+                    tl.tx_type, tl.body
+                ),
                 None => println!("    different or unknown protocol"),
             }
         }

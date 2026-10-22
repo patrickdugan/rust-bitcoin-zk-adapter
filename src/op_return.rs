@@ -34,9 +34,15 @@ impl fmt::Display for DecodeError {
             Self::TruncatedData => write!(f, "incomplete pushed data"),
             Self::UnsupportedOpcode(op) => write!(f, "opcode 0x{op:02x} is not a data push"),
             Self::DataTooLarge => write!(f, "extracted data exceeds application length limit"),
-            Self::MissingTransactionType => write!(f, "TradeLayer marker is missing transaction type"),
-            Self::InvalidTransactionType(c) => write!(f, "invalid base36 transaction type byte 0x{c:02x}"),
-            Self::NonPrintablePayload => write!(f, "TradeLayer envelope body contains non-printable bytes"),
+            Self::MissingTransactionType => {
+                write!(f, "TradeLayer marker is missing transaction type")
+            }
+            Self::InvalidTransactionType(c) => {
+                write!(f, "invalid base36 transaction type byte 0x{c:02x}")
+            }
+            Self::NonPrintablePayload => {
+                write!(f, "TradeLayer envelope body contains non-printable bytes")
+            }
         }
     }
 }
@@ -73,12 +79,16 @@ pub fn decode_op_return(script: &[u8]) -> Result<Vec<u8>, DecodeError> {
                 usize::from(length)
             }
             0x4d => {
-                let b = script.get(cursor..cursor + 2).ok_or(DecodeError::TruncatedLength)?;
+                let b = script
+                    .get(cursor..cursor + 2)
+                    .ok_or(DecodeError::TruncatedLength)?;
                 cursor += 2;
                 usize::from(u16::from_le_bytes([b[0], b[1]]))
             }
             0x4e => {
-                let b = script.get(cursor..cursor + 4).ok_or(DecodeError::TruncatedLength)?;
+                let b = script
+                    .get(cursor..cursor + 4)
+                    .ok_or(DecodeError::TruncatedLength)?;
                 cursor += 4;
                 u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize
             }
@@ -104,9 +114,7 @@ pub struct TradeLayerEnvelope {
 
 /// Recognizes exactly lowercase ASCII "tl" followed by one base36 type byte.
 /// Returns None for other protocols, Err for malformed tl-prefixed payloads.
-pub fn decode_tradelayer_envelope(
-    data: &[u8],
-) -> Result<Option<TradeLayerEnvelope>, DecodeError> {
+pub fn decode_tradelayer_envelope(data: &[u8]) -> Result<Option<TradeLayerEnvelope>, DecodeError> {
     if !data.starts_with(b"tl") {
         return Ok(None);
     }
@@ -126,9 +134,7 @@ pub fn decode_tradelayer_envelope(
 
 /// Decode a candidate extracted from a transaction or block.
 /// Does not validate balances, senders, activation heights, or settlements.
-pub fn decode_candidate(
-    candidate: &Candidate,
-) -> Result<Option<TradeLayerEnvelope>, DecodeError> {
+pub fn decode_candidate(candidate: &Candidate) -> Result<Option<TradeLayerEnvelope>, DecodeError> {
     let data = decode_op_return(&candidate.script)?;
     decode_tradelayer_envelope(&data)
 }
