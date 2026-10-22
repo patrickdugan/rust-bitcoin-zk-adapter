@@ -1,0 +1,41 @@
+# Sample deployment only. Create the service accounts and socket IPC group.
+# Provision a hard quota/bounded filesystem for worker staging separately.
+[Unit]
+Description=Bitcoin Supernode isolated Raito proof-fetch broker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=supernode-fetch
+Group=supernode-ipc
+EnvironmentFile=/etc/supernode/producer.env
+ExecStart=/opt/supernode/bin/supernode-proof-worker-broker
+RuntimeDirectory=supernode-worker/socket
+RuntimeDirectoryMode=0770
+StateDirectory=supernode-worker/staging
+StateDirectoryMode=0700
+UMask=0007
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=4G
+MemorySwapMax=0
+TasksMax=64
+KillMode=control-group
+TimeoutStopSec=10s
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

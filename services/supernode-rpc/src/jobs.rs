@@ -24,6 +24,8 @@ use tokio::{
 
 #[cfg(unix)]
 use crate::broker::BrokerClient;
+#[cfg(unix)]
+use crate::verification_broker::IsolatedRaitoVerifier;
 
 use crate::{
     cache::ArtifactStore,
@@ -345,6 +347,8 @@ pub struct JobManager {
     #[cfg(unix)]
     broker: Option<BrokerClient>,
     raito_verifier: Option<RaitoVerifier>,
+    #[cfg(unix)]
+    isolated_verifier: Option<IsolatedRaitoVerifier>,
     raito_fetch_config: Option<PathBuf>,
     memory: Arc<Semaphore>,
     slots: Arc<Semaphore>,
@@ -519,6 +523,8 @@ impl JobManager {
             #[cfg(unix)]
             broker: None,
             raito_verifier,
+            #[cfg(unix)]
+            isolated_verifier: None,
             raito_fetch_config,
             memory: Arc::new(Semaphore::new(memory_budget_mib as usize)),
             slots: Arc::new(Semaphore::new(worker_count)),
@@ -545,15 +551,42 @@ impl JobManager {
         Ok(self)
     }
 
+    #[cfg(unix)]
+    pub fn with_isolated_verifier(
+        mut self: Arc<Self>,
+        verifier: IsolatedRaitoVerifier,
+    ) -> Result<Arc<Self>, String> {
+        if self.raito_verifier.is_some() {
+            return Err("isolated Raito verifier cannot coexist with direct execution".into());
+        }
+        Arc::get_mut(&mut self)
+            .ok_or("isolated verifier must be installed before sharing job manager")?
+            .isolated_verifier = Some(verifier);
+        Ok(self)
+    }
+
+    fn has_raito_verifier(&self) -> bool {
+        self.raito_verifier.is_some() || {
+            #[cfg(unix)]
+            {
+                self.isolated_verifier.is_some()
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+    }
+
     pub fn capabilities(&self) -> Value {
         json!({
             "queue_enabled":true,
             "raito_worker_configured":self.raito_worker_configured(),
             "separate_uid_broker_configured":self.broker_configured(),
-            "raito_verifier_configured":self.raito_verifier.is_some(),
+            "raito_verifier_configured":self.has_raito_verifier(),
             "raito_fetch_configured":self.raito_fetch_config.is_some(),
-            "typed_raito_receipts_enabled":self.raito_verifier.is_some(),
-            "verification_retry_available":self.raito_verifier.is_some(),
+            "typed_raito_receipts_enabled":self.has_raito_verifier(),
+            "verification_retry_available":self.has_raito_verifier(),
             "shinigami_worker_configured":self.workers.enabled(&JobKind::Shinigami),
             "max_pending":MAX_PENDING_JOBS,
             "max_worker_count":self.worker_count,
@@ -568,7 +601,7 @@ impl JobManager {
     }
 
     pub fn raito_verifier_configured(&self) -> bool {
-        self.raito_verifier.is_some()
+        self.has_raito_verifier()
     }
 
     fn broker_configured(&self) -> bool {
@@ -788,7 +821,7 @@ impl JobManager {
     /// Verify the retained output without re-running an expensive prover.
     /// A fresh RPC submission is never able to claim verification by itself.
     pub async fn retry_verification(self: &Arc<Self>, id: &str) -> Result<JobRecord, String> {
-        if self.raito_verifier.is_none() {
+        if !self.has_raito_verifier() {
             return Err("Raito verifier is not configured".into());
         }
         let queue_permit = self
@@ -859,10 +892,9 @@ impl JobManager {
         digest: &str,
         size: u64,
     ) -> Result<(), String> {
-        let verifier = self
-            .raito_verifier
-            .as_ref()
-            .ok_or("Raito verifier is not configured")?;
+        if !self.has_raito_verifier() {
+            return Err("Raito verifier is not configured".into());
+        }
         let _memory = self
             .memory
             .clone()
@@ -876,7 +908,23 @@ impl JobManager {
             .await
             .map_err(|error| error.to_string())?;
         self.check_chain(record).await?;
-        let report = verifier.verify(&self.root, record, digest).await?;
+        #[cfg(unix)]
+        let report = if let Some(verifier) = self.isolated_verifier.as_ref() {
+            verifier.verify(&self.root, record, digest).await?
+        } else {
+            self.raito_verifier
+                .as_ref()
+                .ok_or("Raito verifier is not configured")?
+                .verify(&self.root, record, digest)
+                .await?
+        };
+        #[cfg(not(unix))]
+        let report = self
+            .raito_verifier
+            .as_ref()
+            .ok_or("Raito verifier is not configured")?
+            .verify(&self.root, record, digest)
+            .await?;
         let path = self.root.join(format!("{}.output", record.id));
         let (actual, actual_size, _) = checked_result_digest(&path)?;
         if actual != digest || actual_size != size {
@@ -1163,7 +1211,7 @@ impl JobManager {
         match result {
             Ok((digest, size, index_digest)) => {
                 let should_verify = record.kind == JobKind::Raito
-                    && self.raito_verifier.is_some()
+                    && self.has_raito_verifier()
                     && record.expected_txid.is_some();
                 self.set_status(
                     &id,

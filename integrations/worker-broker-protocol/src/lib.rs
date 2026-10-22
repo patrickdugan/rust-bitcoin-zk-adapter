@@ -176,3 +176,107 @@ mod tests {
         assert!(value.get("proof_verified").is_none());
     }
 }
+
+/// Versioned request to an independently isolated Raito/STARK verifier.
+/// Only compressed proof bytes follow this header; the gateway's job files
+/// and policy storage are inaccessible from the verifier service.
+pub const MAX_VERIFY_PROOF_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyRequest {
+    pub version: u8,
+    pub job_id: String,
+    pub network: String,
+    pub expected_txid: String,
+    pub block_hash: String,
+    pub block_height: u64,
+    pub policy_sha256: String,
+    pub proof_sha256: String,
+    pub proof_bytes: u64,
+}
+
+impl VerifyRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != VERSION
+            || !hex_hash(&self.job_id)
+            || self.network != "main"
+            || !hex_hash(&self.expected_txid)
+            || !hex_hash(&self.block_hash)
+            || self.block_height > u32::MAX as u64
+            || !hex_hash(&self.policy_sha256)
+            || !hex_hash(&self.proof_sha256)
+            || !(1..=MAX_VERIFY_PROOF_BYTES).contains(&self.proof_bytes)
+        {
+            return Err("invalid or unsupported Raito verifier request".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyReply {
+    pub version: u8,
+    /// Present only after a separate pinned Cairo/STWO verifier succeeds.
+    /// The gateway parses and checks every typed field again.
+    pub receipt: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+impl VerifyReply {
+    pub fn accepted(&self) -> Result<&serde_json::Value, String> {
+        if self.version != VERSION || self.error.is_some() {
+            return Err("isolated Raito verifier rejected the proof".into());
+        }
+        self.receipt
+            .as_ref()
+            .ok_or("Raito verifier omitted the typed receipt".into())
+    }
+
+    pub fn rejected(message: &str) -> Self {
+        Self {
+            version: VERSION,
+            receipt: None,
+            error: Some(message.chars().take(200).collect()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod verifier_tests {
+    use super::*;
+    #[test]
+    fn verifier_request_rejects_wrong_chain_and_oversized_proof() {
+        let mut request = VerifyRequest {
+            version: VERSION,
+            job_id: "ab".repeat(32),
+            network: "main".into(),
+            expected_txid: "cd".repeat(32),
+            block_hash: "ef".repeat(32),
+            block_height: 900000,
+            policy_sha256: "12".repeat(32),
+            proof_sha256: "34".repeat(32),
+            proof_bytes: 4096,
+        };
+        request.validate().unwrap();
+        request.network = "regtest".into();
+        assert!(request.validate().is_err());
+        request.network = "main".into();
+        request.proof_bytes = MAX_VERIFY_PROOF_BYTES + 1;
+        assert!(request.validate().is_err());
+    }
+    #[test]
+    fn verifier_reply_requires_typed_receipt_and_strict_fields() {
+        assert!(VerifyReply::rejected("STARK invalid").accepted().is_err());
+        let forged = VerifyReply {
+            version: VERSION,
+            receipt: None,
+            error: None,
+        };
+        assert!(forged.accepted().is_err());
+        let mut json = serde_json::to_value(forged).unwrap();
+        json["proof_verified"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<VerifyReply>(json).is_err());
+    }
+}

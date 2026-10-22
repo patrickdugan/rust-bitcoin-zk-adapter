@@ -7,6 +7,8 @@ use rust_bitcoin_supernode_rpc::chain::{
 };
 use rust_bitcoin_supernode_rpc::jobs::{JobLimits, JobManager, WorkerPrograms};
 use rust_bitcoin_supernode_rpc::verification::RaitoVerifier;
+#[cfg(unix)]
+use rust_bitcoin_supernode_rpc::verification_broker::IsolatedRaitoVerifier;
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use std::sync::Arc;
 use std::{env, error::Error, net::SocketAddr};
@@ -85,6 +87,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let broker_socket = env::var("SUPERNODE_PROOF_BROKER_SOCKET").ok();
         #[cfg(not(unix))]
         let broker_socket: Option<String> = None;
+        #[cfg(unix)]
+        if broker_socket.is_some() && nix::unistd::Uid::effective().is_root() {
+            return Err("isolated Supernode gateway must use an unprivileged OS UID".into());
+        }
         if broker_socket.is_some()
             && (env::var("SUPERNODE_RAITO_PROVER").is_ok()
                 || env::var("SUPERNODE_SHINIGAMI_PROVER").is_ok()
@@ -105,6 +111,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             raito: env::var("SUPERNODE_RAITO_PROVER").ok().map(Into::into),
             shinigami: env::var("SUPERNODE_SHINIGAMI_PROVER").ok().map(Into::into),
         };
+        #[cfg(unix)]
+        let verify_socket = env::var("SUPERNODE_PROOF_VERIFIER_SOCKET").ok();
+        #[cfg(not(unix))]
+        let verify_socket: Option<String> = None;
+        if verify_socket.is_some() && broker_socket.is_none() {
+            return Err(
+                "separate-UID Raito verification requires separate-UID proof production".into(),
+            );
+        }
+        if verify_socket.is_some() && env::var("SUPERNODE_RAITO_VERIFIER").is_ok() {
+            return Err("isolated verifier socket excludes gateway direct STARK executable".into());
+        }
+        if verify_socket.is_none()
+            && env::var("SUPERNODE_RAITO_VERIFIER").is_ok()
+            && env::var("SUPERNODE_ALLOW_SAME_UID_VERIFIER").as_deref() != Ok("1")
+        {
+            return Err(
+                "direct same-UID STARK verifier requires explicit development opt-in".into(),
+            );
+        }
         let verifier = match env::var("SUPERNODE_RAITO_VERIFIER") {
             Ok(executable) => Some(RaitoVerifier {
                 executable: executable.into(),
@@ -134,6 +160,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Err("broker must run with a UID distinct from gateway".into());
             }
             manager.with_broker(BrokerClient::new(socket.into(), uid)?)?
+        } else {
+            manager
+        };
+        #[cfg(unix)]
+        let manager = if let Some(socket) = verify_socket {
+            let uid: u32 = env::var("SUPERNODE_PROOF_VERIFIER_UID")?.parse()?;
+            let producer: u32 = env::var("SUPERNODE_PROOF_BROKER_UID")?.parse()?;
+            if uid == producer {
+                return Err("Raito verifier and proof producer must use distinct OS UIDs".into());
+            }
+            manager.with_isolated_verifier(IsolatedRaitoVerifier::new(socket.into(), uid)?)?
         } else {
             manager
         };

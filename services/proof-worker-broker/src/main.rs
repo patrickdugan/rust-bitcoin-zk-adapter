@@ -120,8 +120,11 @@ fn load_config() -> Result<Config, String> {
         .map_err(|e| e.to_string())?
         .parse()
         .map_err(|_| "invalid gateway UID")?;
-    if gateway_uid == nix::unistd::Uid::effective().as_raw() {
-        return Err("broker service and gateway must use distinct OS UIDs".into());
+    if gateway_uid == 0
+        || nix::unistd::Uid::effective().is_root()
+        || gateway_uid == nix::unistd::Uid::effective().as_raw()
+    {
+        return Err("broker and gateway require distinct unprivileged OS UIDs".into());
     }
     let root = PathBuf::from(env::var("SUPERNODE_BROKER_STAGING_DIR").map_err(|e| e.to_string())?);
     private_root(&root)?;

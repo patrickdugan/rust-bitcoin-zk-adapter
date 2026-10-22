@@ -18,9 +18,11 @@ Provision three service ownership domains on Linux:
 - `supernode-gateway`: gateway RPC, 0700 artifact and job metadata directories.
 - `supernode-fetch`: broker, upstream Raito fetcher and Bitcoin Core cookie
   access, with its own 0700 staging directory.
-- An operator-controlled shared IPC group, `supernode-ipc`, whose members
-  include the gateway and broker. The socket lives under a broker-owned
-  directory with mode `0770`; the Unix socket itself uses mode `0660`.
+- `supernode-verify`: independently pinned Raito/STWO verifier and 0700
+  proof staging directory, separate from both gateway and fetcher.
+- Operator-controlled Unix socket IPC groups connect the gateway to each
+  broker separately. Socket parents use mode `0770` and sockets use
+  mode `0660`, supplemented by kernel peer-UID checks.
 
 The broker checks that its **peer's kernel UID equals the gateway UID**.
 The gateway also checks that the **socket peer's UID equals the configured
@@ -67,8 +69,8 @@ Gateway configuration:
 ```ini
 SUPERNODE_PROOF_BROKER_SOCKET=/run/supernode-worker/socket/broker.sock
 SUPERNODE_PROOF_BROKER_UID=1235
-SUPERNODE_RAITO_VERIFIER=/opt/supernode/bin/raito-verify
-SUPERNODE_RAITO_VERIFIER_SHA256=64_LOWERCASE_HEX_OF_VERIFIER
+SUPERNODE_PROOF_VERIFIER_SOCKET=/run/supernode-verify/socket/verify.sock
+SUPERNODE_PROOF_VERIFIER_UID=1236
 ```
 
 Use `SUPERNODE_PROOF_BROKER_UID` from `id -u supernode-fetch`.
@@ -119,10 +121,12 @@ as unverified/failed and are not silently replayed.
 
 The separate worker UID protects the gateway's metadata from a compromised
 proof *fetcher* when the operator enforces OS filesystem permissions.
-The pinned Raito verifier is currently still launched by the gateway under
-the gateway service UID. A vulnerability in the STARK verifier could cross
-that trust boundary. Moving verification behind an independently privileged,
-authenticated verifier IPC service remains a further hardening objective.
+The optional `services/raito-verifier-broker` now places the pinned
+Cairo/STWO verifier under a **third service UID**. Its socket authenticates
+the gateway via `SO_PEERCRED`, and its output is checked again before the
+gateway promotes any typed receipt. Legacy same-UID execution remains a
+development-only mode enabled by an explicit override. See
+[the isolated Raito verifier instructions](../raito-verifier-broker/README.md).
 
 Before treating this as production-ready, test actual separate-UID deployment,
 symlink/hardlink races, gateway and broker SIGKILL, stale socket cleanup,
