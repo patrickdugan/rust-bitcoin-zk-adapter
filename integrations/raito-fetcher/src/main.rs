@@ -1,8 +1,8 @@
 //! Operator-approved Raito compressed SPV proof fetcher.
 //! Fetching bytes is NEVER evidence of proof validity. The Supernode's
 //! independently pinned Raito verifier checks the resulting STARK statement.
-use bitcoin::{BlockHash, Txid};
 use bitcoin::hashes::{sha256, Hash, HashEngine};
+use bitcoin::{BlockHash, Txid};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     str::FromStr,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{process::Command, time::timeout};
 use url::{Host, Url};
@@ -64,7 +64,8 @@ fn read_bounded_regular(path: &Path, max: u64) -> Result<Vec<u8>, String> {
         return Err("file is absent, unsafe, empty or exceeds its size cap".into());
     }
     let mut bytes = Vec::with_capacity(meta.len() as usize);
-    File::open(path).map_err(|e| e.to_string())?
+    File::open(path)
+        .map_err(|e| e.to_string())?
         .take(max + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
@@ -76,10 +77,7 @@ fn read_bounded_regular(path: &Path, max: u64) -> Result<Vec<u8>, String> {
 
 fn file_digest(path: &Path) -> Result<String, String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if !metadata.file_type().is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_CLIENT_BYTES
-    {
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_CLIENT_BYTES {
         return Err("upstream Raito client executable is absent or unsafe".into());
     }
     let mut file = File::open(path).map_err(|e| e.to_string())?;
@@ -131,8 +129,10 @@ fn operator_config(path: &Path) -> Result<FetchConfig, String> {
 
 fn validate_url(value: &str, is_core: bool) -> Result<(), String> {
     let url = Url::parse(value).map_err(|e| e.to_string())?;
-    if !url.username().is_empty() || url.password().is_some()
-        || url.fragment().is_some() || url.query().is_some()
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.query().is_some()
     {
         return Err("upstream URL may not contain credentials, query or fragment".into());
     }
@@ -158,8 +158,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<WorkerArgs, String> 
     while let Some(key) = iter.next() {
         if !matches!(
             key.as_str(),
-            "--input" | "--output" | "--network" | "--blockhash"
-                | "--height" | "--policy-sha256" | "--expected-txid"
+            "--input"
+                | "--output"
+                | "--network"
+                | "--blockhash"
+                | "--height"
+                | "--policy-sha256"
+                | "--expected-txid"
         ) {
             return Err(format!("unexpected worker argument: {key}"));
         }
@@ -169,10 +174,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<WorkerArgs, String> 
         }
     }
     if fields.len() != 7 {
-        return Err("expected worker input, output, network, blockhash, height, policy, TXID".into());
+        return Err(
+            "expected worker input, output, network, blockhash, height, policy, TXID".into(),
+        );
     }
     let get = |key: &str| -> Result<&str, String> {
-        fields.get(key).map(String::as_str).ok_or("required worker argument missing".into())
+        fields
+            .get(key)
+            .map(String::as_str)
+            .ok_or("required worker argument missing".into())
     };
     if get("--network")? != "main" {
         return Err("pinned Raito SPV policy currently supports Bitcoin mainnet only".into());
@@ -190,14 +200,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<WorkerArgs, String> 
         output,
         txid: Txid::from_str(get("--expected-txid")?).map_err(|e| e.to_string())?,
         block_hash: BlockHash::from_str(get("--blockhash")?).map_err(|e| e.to_string())?,
-        height: get("--height")?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?,
+        height: get("--height")?
+            .parse()
+            .map_err(|e: std::num::ParseIntError| e.to_string())?,
     })
 }
 
 fn validate_request(args: &WorkerArgs) -> Result<(), String> {
     let bytes = read_bounded_regular(&args.input, MAX_REQUEST_BYTES)?;
     let req: FetchRequest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if req.schema != SCHEMA || req.network != "main"
+    if req.schema != SCHEMA
+        || req.network != "main"
         || Txid::from_str(&req.txid).map_err(|e| e.to_string())? != args.txid
         || BlockHash::from_str(&req.block_hash).map_err(|e| e.to_string())? != args.block_hash
         || req.block_height != args.height
@@ -211,7 +224,9 @@ fn bitcoin_cookie(path: &Path) -> Result<String, String> {
     let raw = String::from_utf8(read_bounded_regular(path, MAX_COOKIE_BYTES)?)
         .map_err(|e| e.to_string())?;
     let cookie = raw.trim_end_matches(['\r', '\n']);
-    let (user, pass) = cookie.split_once(':').ok_or("invalid Bitcoin Core cookie")?;
+    let (user, pass) = cookie
+        .split_once(':')
+        .ok_or("invalid Bitcoin Core cookie")?;
     if user.is_empty() || pass.is_empty() || cookie.contains(['\r', '\n']) {
         return Err("invalid Bitcoin Core cookie".into());
     }
@@ -259,9 +274,7 @@ async fn fetch(args: &WorkerArgs, config: &FetchConfig) -> Result<(), String> {
         return Err(format!("upstream Raito client fetch failed: {status}"));
     }
     let meta = fs::symlink_metadata(&args.output).map_err(|e| e.to_string())?;
-    if !meta.file_type().is_file() || meta.len() == 0
-        || meta.len() > MAX_COMPRESSED_PROOF_BYTES
-    {
+    if !meta.file_type().is_file() || meta.len() == 0 || meta.len() > MAX_COMPRESSED_PROOF_BYTES {
         return Err("Raito proof output is unsafe or exceeds 16 MiB cap".into());
     }
     Ok(())
@@ -282,11 +295,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
     fn tmp(label: &str) -> PathBuf {
         env::temp_dir().join(format!(
             "raito-fetch-{label}-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
     fn make_args(dir: &Path) -> WorkerArgs {
@@ -304,8 +321,10 @@ mod tests {
             serde_json::json!({
                 "schema":SCHEMA, "network":"main", "txid":args.txid.to_string(),
                 "block_hash":args.block_hash.to_string(), "block_height":args.height
-            }).to_string(),
-        ).unwrap();
+            })
+            .to_string(),
+        )
+        .unwrap();
     }
     #[test]
     fn strict_fetch_request_and_urls() {
@@ -321,11 +340,26 @@ mod tests {
         assert!(validate_url("http://remote.example:8332", true).is_err());
         assert!(validate_url("http://api.raito.wtf", false).is_err());
         assert!(validate_url("http://evil:pass@127.0.0.1:8332", true).is_err());
-        let parsed = parse_args([
-            "--input", "in", "--output", "out", "--network", "regtest",
-            "--blockhash", &"ab".repeat(32), "--height", "300",
-            "--policy-sha256", &"cd".repeat(32), "--expected-txid", &"12".repeat(32),
-        ].into_iter().map(str::to_owned));
+        let parsed = parse_args(
+            [
+                "--input",
+                "in",
+                "--output",
+                "out",
+                "--network",
+                "regtest",
+                "--blockhash",
+                &"ab".repeat(32),
+                "--height",
+                "300",
+                "--policy-sha256",
+                &"cd".repeat(32),
+                "--expected-txid",
+                &"12".repeat(32),
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
         assert!(parsed.is_err());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -352,17 +386,25 @@ mod tests {
             raito_bridge_url: "https://api.raito.wtf".into(),
         };
         let conf_path = dir.join("fetch.json");
-        fs::write(&conf_path, serde_json::json!({
-            "client_binary":conf.client_binary,
-            "client_sha256":conf.client_sha256,
-            "bitcoin_rpc_url":conf.bitcoin_rpc_url,
-            "bitcoin_rpc_cookie_file":conf.bitcoin_rpc_cookie_file,
-            "raito_bridge_url":conf.raito_bridge_url,
-        }).to_string()).unwrap();
+        fs::write(
+            &conf_path,
+            serde_json::json!({
+                "client_binary":conf.client_binary,
+                "client_sha256":conf.client_sha256,
+                "bitcoin_rpc_url":conf.bitcoin_rpc_url,
+                "bitcoin_rpc_cookie_file":conf.bitcoin_rpc_cookie_file,
+                "raito_bridge_url":conf.raito_bridge_url,
+            })
+            .to_string(),
+        )
+        .unwrap();
         fs::set_permissions(&conf_path, fs::Permissions::from_mode(0o600)).unwrap();
         let loaded = operator_config(&conf_path).unwrap();
         fetch(&args, &loaded).await.unwrap();
-        assert_eq!(fs::read(&args.output).unwrap(), b"unverified-compressed-proof-test-bytes");
+        assert_eq!(
+            fs::read(&args.output).unwrap(),
+            b"unverified-compressed-proof-test-bytes"
+        );
         assert!(fetch(&args, &loaded).await.is_err());
         fs::remove_file(&args.output).unwrap();
         fs::write(&client, "#!/bin/sh\nexit 0\n").unwrap();
