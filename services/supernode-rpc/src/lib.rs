@@ -24,6 +24,8 @@ pub mod chain;
 pub mod jobs;
 pub mod process;
 pub mod verification;
+#[cfg(unix)]
+pub mod verification_broker;
 
 pub const MAX_RPC_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_RPC_RESPONSE_BYTES: usize = 24 * 1024 * 1024;

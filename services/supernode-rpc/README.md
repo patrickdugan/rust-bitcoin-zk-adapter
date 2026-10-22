@@ -321,3 +321,22 @@ are admitted (256 MiB total), even when all dispatcher queue slots are
 occupied. Separate from this, retained completed outputs still use the
 oldest-first 256 MiB budget. Kernel disk quotas remain necessary while
 workers write files and for non-Raito worker outputs.
+
+
+### Separate-UID Cairo/STWO verification
+
+`SUPERNODE_PROOF_VERIFIER_SOCKET` and `SUPERNODE_PROOF_VERIFIER_UID`
+enable an independently privileged Raito verifier service. In this mode the
+gateway transfers already-imported compressed proof bytes (at most 16 MiB)
+over authenticated Unix IPC. The receiver recomputes SHA-256, calls its own
+operator-pinned `raito-verify --gateway` executable with `dev=false`, and
+returns a typed receipt only after successful cryptographic verification.
+The gateway checks the returned receipt against the durable job's transaction,
+Bitcoin Core-active block, proof digest, and policy. Proof generation and
+verification require separate Unix identities, each distinct from the
+gateway. The gateway never launches the heavy STARK verifier itself.
+
+For development-only direct execution, set
+`SUPERNODE_ALLOW_SAME_UID_VERIFIER=1`. The production configuration
+uses a broker socket and omits the direct
+`SUPERNODE_RAITO_VERIFIER` executable setting.
