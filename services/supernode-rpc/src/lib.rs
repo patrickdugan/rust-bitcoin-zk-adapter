@@ -917,6 +917,62 @@ mod tests {
         assert!(verified_parent_outputs(&raw, parent.compute_txid(), &[1]).is_err());
     }
 
+
+    #[tokio::test]
+    async fn gateway_artifacts_recheck_core_after_new_chain_epoch() {
+        let (upstream, _, blockhash) = mock_core().await;
+        let directory = std::env::temp_dir().join(format!(
+            "supernode-rpc-artifacts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Arc::new(crate::cache::ArtifactStore::new(directory.clone(), 4096).unwrap());
+        let tracker = Arc::new(crate::chain::ChainTracker::new(false));
+        let core = CoreRpc::new(&upstream, "testuser".into(), "testpass".into()).unwrap();
+        let gateway = Gateway::new(core, "0123456789abcdefTEST".into(), 4)
+            .unwrap()
+            .with_artifact_store(store)
+            .with_chain_tracker(tracker.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router(gateway)).await.unwrap() });
+
+        let put = query(
+            &endpoint,
+            "zk.artifact.put",
+            json!([900044, blockhash, "raito_input", "aabbccdd"]),
+        ).await;
+        assert_eq!(put["error"], Value::Null);
+        let id = put["result"]["artifact"]["id"].as_str().unwrap().to_owned();
+        let get = query(&endpoint, "zk.artifact.get", json!([id])).await;
+        assert_eq!(get["result"]["data_hex"], "aabbccdd");
+        assert_eq!(get["result"]["proof_verified"], false);
+        assert_eq!(get["result"]["core_active_chain_at_lookup"], true);
+        assert_eq!(get["result"]["revalidated_after_epoch_change"], false);
+
+        tracker.record(crate::chain::SequenceEvent {
+            hash: "ff".repeat(32),
+            sequence: 1,
+            kind: crate::chain::SequenceKind::BlockConnected,
+        }).await;
+        // An observed tip advance must not invalidate immutable data for a
+        // historical block that Bitcoin Core confirms remains active.
+        let second = query(&endpoint, "zk.artifact.get", json!([id])).await;
+        assert_eq!(second["error"], Value::Null);
+        assert_eq!(second["result"]["revalidated_after_epoch_change"], true);
+
+        let rejected = query(
+            &endpoint,
+            "zk.artifact.put",
+            json!([900044, "00".repeat(32), "raito_input", "aabb"]),
+        ).await;
+        assert_eq!(rejected["error"]["code"], -32014);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn invalid_context_input_fails_before_rpc_and_gateway_requires_bearer() {
         let (upstream, _, _) = mock_core().await;
