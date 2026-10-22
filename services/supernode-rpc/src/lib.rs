@@ -1006,6 +1006,7 @@ mod tests {
         }
         assert!(requires_control_token("zk.artifact.put"));
         assert!(requires_control_token("zk.proof.submit"));
+        assert!(requires_control_token("zk.proof.verify"));
         assert!(!requires_control_token("zk.proof.get"));
         assert!(!requires_control_token("zk.gettxcontext"));
     }

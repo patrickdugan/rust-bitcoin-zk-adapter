@@ -1568,6 +1568,43 @@ mod tests {
             &content[..20]
         );
 
+
+        // A verified job is immutable under a duplicate retry. Model the
+        // restart recovery state and verify the existing proof a second time.
+        assert!(manager.retry_verification(&started.id).await.is_err());
+        {
+            let mut state = manager.records.lock().await;
+            let mut old = state.get(&started.id).unwrap().clone();
+            old.status = JobStatus::CompletedUnverified;
+            old.verified_raito = None;
+            old.error = Some("simulated verifier restart".into());
+            atomic_json(&manager.root, &old).unwrap();
+            state.insert(started.id.clone(), old);
+        }
+        let retried = manager.retry_verification(&started.id).await.unwrap();
+        assert_eq!(retried.status, JobStatus::VerifyingRaito);
+        assert!(manager.retry_verification(&started.id).await.is_err());
+        let reverified = timeout(Duration::from_secs(8), async {
+            loop {
+                let job = manager.status(&started.id).await.unwrap();
+                if matches!(job.status, JobStatus::VerifiedRaito | JobStatus::Failed)
+                    || (job.status == JobStatus::CompletedUnverified && job.error.is_some())
+                {
+                    break job;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            reverified.status,
+            JobStatus::VerifiedRaito,
+            "{:?}",
+            reverified.error
+        );
+        assert_eq!(reverified.verified_raito.as_ref(), Some(&receipt));
+
         // Receipt survives a gateway restart with a new in-memory job map.
         let reopened = JobManager::new(
             directory.join("jobs"),
