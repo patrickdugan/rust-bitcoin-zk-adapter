@@ -278,7 +278,7 @@ async fn accept_one(
     }
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
-    launch_worker(&config, &request, &input, &output).await?;
+    launch_worker(config, &request, &input, &output).await?;
     let (digest, size) = file_digest(&output, MAX_OUTPUT_BYTES)?;
     let reply = RunReply {
         version: VERSION,
