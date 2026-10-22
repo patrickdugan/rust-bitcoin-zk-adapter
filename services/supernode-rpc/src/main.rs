@@ -4,6 +4,7 @@ use rust_bitcoin_supernode_rpc::chain::{
 };
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use std::sync::Arc;
+use rust_bitcoin_supernode_rpc::cache::{ArtifactStore, MAX_STORE_BYTES};
 use std::{env, error::Error, net::SocketAddr};
 
 fn credential_pair() -> Result<(String, String), Box<dyn Error>> {
