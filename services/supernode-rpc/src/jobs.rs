@@ -4,13 +4,13 @@
 //! memory estimate is an *admission reservation*, not an operating-system RSS
 //! limit. Configure cgroups/containers around approved prover binaries.
 
-use bitcoin::hashes::{sha256, Hash};
+use bitcoin::hashes::{sha256, Hash, HashEngine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -28,6 +28,8 @@ pub const MAX_PENDING_JOBS: usize = 16;
 pub const MAX_JOB_HISTORY: usize = 128;
 pub const MAX_ESTIMATED_MEMORY_MIB: u32 = 32 * 1024;
 pub const MAX_WORKER_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_RETAINED_RESULT_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_RESULT_CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_WORKER_DURATION: Duration = Duration::from_secs(600);
 
 fn unix_time() -> u64 {
@@ -77,6 +79,87 @@ fn hash_bytes(bytes: &[u8]) -> String {
     hex::encode(sha256::Hash::hash(bytes).to_byte_array())
 }
 
+
+/// Hash worker output in a fixed 64 KiB buffer. Large proof files never
+/// enter the RPC process's heap as a single allocation.
+fn checked_result_digest(path: &Path) -> Result<(String, u64), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
+    if !metadata.file_type().is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_WORKER_OUTPUT_BYTES
+    {
+        return Err("worker output missing, not a regular file, or exceeds limit".into());
+    }
+    let mut file = File::open(path).map_err(|err| err.to_string())?;
+    let mut sha = sha256::Hash::engine();
+    let mut buf = [0u8; 64 * 1024];
+    let mut read_bytes = 0u64;
+    loop {
+        let count = file.read(&mut buf).map_err(|err| err.to_string())?;
+        if count == 0 {
+            break;
+        }
+        read_bytes += count as u64;
+        if read_bytes > MAX_WORKER_OUTPUT_BYTES {
+            return Err("worker output grew past size limit".into());
+        }
+        sha.input(&buf[..count]);
+    }
+    if read_bytes != metadata.len() {
+        return Err("worker output changed while being hashed".into());
+    }
+    Ok((hex::encode(sha256::Hash::from_engine(sha).to_byte_array()), read_bytes))
+}
+
+/// Bound the total amount of *retained* worker output. An evicted job keeps
+/// its SHA-256 audit digest but cannot serve stale data to RPC consumers.
+fn prune_result_files(
+    root: &Path,
+    records: &mut BTreeMap<String, JobRecord>,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let mut retained = Vec::new();
+    let mut total = 0u64;
+    for (id, record) in records.iter_mut() {
+        if record.status != JobStatus::CompletedUnverified {
+            continue;
+        }
+        let path = root.join(format!("{id}.output"));
+        let length = fs::symlink_metadata(&path)
+            .ok()
+            .filter(|meta| meta.file_type().is_file())
+            .map(|meta| meta.len());
+        match length {
+            Some(length) if (1..=MAX_WORKER_OUTPUT_BYTES).contains(&length) => {
+                record.result_bytes = Some(length);
+                total = total.saturating_add(length);
+                retained.push((record.submitted_unix, id.clone(), length));
+            }
+            _ => {
+                record.status = JobStatus::OutputEvicted;
+                record.result_bytes = None;
+                record.error = Some("worker result is no longer retained".into());
+                atomic_json(root, record)?;
+            }
+        }
+    }
+    retained.sort();
+    for (_, id, size) in retained {
+        if total <= max_bytes {
+            break;
+        }
+        let record = records.get_mut(&id).ok_or("retained result missing")?;
+        let path = root.join(format!("{id}.output"));
+        fs::remove_file(&path).map_err(|err| err.to_string())?;
+        total = total.saturating_sub(size);
+        record.status = JobStatus::OutputEvicted;
+        record.result_bytes = None;
+        record.error = Some("worker result evicted by disk quota".into());
+        atomic_json(root, record)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -99,6 +182,7 @@ pub enum JobStatus {
     Queued,
     Running,
     CompletedUnverified,
+    OutputEvicted,
     Failed,
     Interrupted,
 }
@@ -117,6 +201,8 @@ pub struct JobRecord {
     pub estimated_memory_mib: u32,
     pub status: JobStatus,
     pub result_sha256: Option<String>,
+    #[serde(default)]
+    pub result_bytes: Option<u64>,
     pub error: Option<String>,
     pub submitted_unix: u64,
     pub finished_unix: Option<u64>,
@@ -222,8 +308,27 @@ impl JobManager {
             for (_, id) in oldest.into_iter().take(records.len() - MAX_JOB_HISTORY) {
                 records.remove(&id);
                 let _ = fs::remove_file(root.join(format!("{id}.json")));
+                let _ = fs::remove_file(root.join(format!("{id}.input")));
+                let _ = fs::remove_file(root.join(format!("{id}.output")));
             }
         }
+        // Orphaned inputs and failed/abandoned outputs are not retained
+        // across restarts. Only a completed record may own an output file.
+        for entry in fs::read_dir(&root).map_err(|err| err.to_string())? {
+            let entry = entry.map_err(|err| err.to_string())?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let cleanup = name.strip_suffix(".input").is_some_and(is_hash)
+                || name.strip_suffix(".output").is_some_and(|id| {
+                    is_hash(id)
+                        && !records.get(id).is_some_and(|record| {
+                            record.status == JobStatus::CompletedUnverified
+                        })
+                });
+            if cleanup && entry.file_type().map_err(|err| err.to_string())?.is_file() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        prune_result_files(&root, &mut records, MAX_RETAINED_RESULT_BYTES)?;
         Ok(Arc::new(Self {
             root,
             artifacts,
@@ -248,7 +353,10 @@ impl JobManager {
             "max_worker_count":self.worker_count,
             "memory_admission_budget_mib":self.memory_budget_mib,
             "hard_os_memory_limit_enforced":false,
-            "max_worker_time_seconds":MAX_WORKER_DURATION.as_secs()
+            "max_worker_time_seconds":MAX_WORKER_DURATION.as_secs(),
+            "max_result_chunk_bytes":MAX_RESULT_CHUNK_BYTES,
+            "max_retained_result_bytes":MAX_RETAINED_RESULT_BYTES,
+            "results_are_cryptographically_verified":false
         })
     }
 
@@ -330,6 +438,7 @@ impl JobManager {
             estimated_memory_mib: memory_mib,
             status: JobStatus::Queued,
             result_sha256: None,
+            result_bytes: None,
             error: None,
             submitted_unix: unix_time(),
             finished_unix: None,
@@ -350,6 +459,8 @@ impl JobManager {
                 if let Some(old_id) = oldest_done {
                     state.remove(&old_id);
                     let _ = fs::remove_file(self.root.join(format!("{old_id}.json")));
+                    let _ = fs::remove_file(self.root.join(format!("{old_id}.input")));
+                    let _ = fs::remove_file(self.root.join(format!("{old_id}.output")));
                 } else {
                     return Err("job record retention cap reached".into());
                 }
@@ -369,12 +480,14 @@ impl JobManager {
         id: &str,
         status: JobStatus,
         digest: Option<String>,
+        length: Option<u64>,
         error: Option<String>,
     ) {
         let mut records = self.records.lock().await;
         if let Some(record) = records.get_mut(id) {
             record.status = status.clone();
             record.result_sha256 = digest;
+            record.result_bytes = length;
             record.error = error;
             if !matches!(status, JobStatus::Queued | JobStatus::Running) {
                 record.finished_unix = Some(unix_time());
@@ -383,13 +496,72 @@ impl JobManager {
                 eprintln!("Could not persist proof job status: {err}");
             }
         }
+        if status == JobStatus::CompletedUnverified {
+            if let Err(err) = prune_result_files(
+                &self.root,
+                &mut records,
+                MAX_RETAINED_RESULT_BYTES,
+            ) {
+                eprintln!("Could not enforce proof output retention quota: {err}");
+            }
+        }
+    }
+
+    /// Return small, hash-checked chunks, never the entire (possibly large)
+    /// unverified STARK output. Every read rechecks active-chain binding.
+    pub async fn result_chunk(
+        &self,
+        id: &str,
+        offset: u64,
+        requested: usize,
+    ) -> Result<Value, String> {
+        if requested == 0 || requested > MAX_RESULT_CHUNK_BYTES {
+            return Err("chunk size exceeds bounded RPC result limit".into());
+        }
+        let record = self.status(id).await?;
+        if record.status != JobStatus::CompletedUnverified {
+            return Err("job does not have a retained completed result".into());
+        }
+        self.check_chain(&record).await?;
+        let path = self.root.join(format!("{id}.output"));
+        let (actual_digest, length) = checked_result_digest(&path)?;
+        if record.result_sha256.as_deref() != Some(actual_digest.as_str())
+            || record.result_bytes.is_some_and(|expected| expected != length)
+        {
+            return Err("retained output failed SHA-256 or size verification".into());
+        }
+        if offset > length {
+            return Err("result chunk offset out of range".into());
+        }
+        let count = requested.min((length - offset) as usize);
+        let mut file = File::open(&path).map_err(|err| err.to_string())?;
+        file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
+        let mut chunk = vec![0u8; count];
+        file.read_exact(&mut chunk).map_err(|err| err.to_string())?;
+        let metadata = file.metadata().map_err(|err| err.to_string())?;
+        if metadata.len() != length {
+            return Err("output changed while reading chunk".into());
+        }
+        self.check_chain(&record).await?;
+        Ok(json!({
+            "job_id":id,
+            "result_sha256":actual_digest,
+            "total_bytes":length,
+            "offset":offset,
+            "data_hex":hex::encode(chunk),
+            "next_offset":offset + count as u64,
+            "complete":offset + count as u64 == length,
+            "proof_verified":false
+        }))
     }
 
     async fn run(self: Arc<Self>, id: String, _queue_permit: OwnedSemaphorePermit) {
         let Some(record) = self.records.lock().await.get(&id).cloned() else {
             return;
         };
-        let result: Result<String, String> = async {
+        let input_path = self.root.join(format!("{id}.input"));
+        let output_path = self.root.join(format!("{id}.output"));
+        let result: Result<(String, u64), String> = async {
             let _memory = self
                 .memory
                 .clone()
@@ -404,23 +576,21 @@ impl JobManager {
                 .map_err(|err| err.to_string())?;
             self.check_chain(&record).await?;
             let (_, data) = self.artifacts.get(&record.input_artifact_id).await?;
-            self.set_status(&id, JobStatus::Running, None, None).await;
+            self.set_status(&id, JobStatus::Running, None, None, None).await;
 
             let worker = self
                 .workers
                 .executable(&record.kind)
                 .ok_or("configured worker disappeared")?;
-            let input = self.root.join(format!("{id}.input"));
-            let output = self.root.join(format!("{id}.output"));
-            fs::write(&input, data).map_err(|err| err.to_string())?;
+            fs::write(&input_path, data).map_err(|err| err.to_string())?;
 
             // Only the operator chooses executable paths. No shell is used,
             // and no RPC field can become part of the executable filename.
             let mut cmd = Command::new(worker);
             cmd.arg("--input")
-                .arg(&input)
+                .arg(&input_path)
                 .arg("--output")
-                .arg(&output)
+                .arg(&output_path)
                 .arg("--network")
                 .arg(&record.network)
                 .arg("--blockhash")
@@ -440,30 +610,30 @@ impl JobManager {
                 .await
                 .map_err(|_| "worker runtime budget exceeded")?
                 .map_err(|err| err.to_string())?;
-            let _ = fs::remove_file(input);
             if !status.success() {
-                let _ = fs::remove_file(&output);
                 return Err(format!("approved worker exited with status {status}"));
             }
             self.check_chain(&record).await?;
-            let meta = fs::symlink_metadata(&output).map_err(|err| err.to_string())?;
-            if !meta.file_type().is_file()
-                || meta.len() == 0
-                || meta.len() > MAX_WORKER_OUTPUT_BYTES
-            {
-                return Err("worker output missing, unsafe or above size cap".into());
-            }
-            let data = fs::read(&output).map_err(|err| err.to_string())?;
-            Ok(hash_bytes(&data))
+            checked_result_digest(&output_path)
         }
         .await;
+        let _ = fs::remove_file(&input_path);
+        if result.is_err() {
+            let _ = fs::remove_file(&output_path);
+        }
         match result {
-            Ok(sha) => {
-                self.set_status(&id, JobStatus::CompletedUnverified, Some(sha), None)
-                    .await;
+            Ok((digest, size)) => {
+                self.set_status(
+                    &id,
+                    JobStatus::CompletedUnverified,
+                    Some(digest),
+                    Some(size),
+                    None,
+                )
+                .await;
             }
             Err(err) => {
-                self.set_status(&id, JobStatus::Failed, None, Some(err))
+                self.set_status(&id, JobStatus::Failed, None, None, Some(err))
                     .await;
             }
         }
@@ -544,6 +714,7 @@ mod tests {
             estimated_memory_mib: 16,
             status: JobStatus::Running,
             result_sha256: None,
+            result_bytes: None,
             error: None,
             submitted_unix: 1,
             finished_unix: None,

@@ -329,6 +329,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
         "zk.artifact.get" => get_artifact(gateway, &params).await,
         "zk.proof.submit" => submit_proof_job(gateway, &params).await,
         "zk.proof.status" => proof_job_status(gateway, &params).await,
+        "zk.proof.get" => proof_job_get(gateway, &params).await,
         "zk.chain.refresh" => gateway
             .chain
             .reconcile(core)
@@ -752,6 +753,25 @@ async fn submit_proof_job(gateway: &Gateway, params: &Value) -> Result<Value, Rp
         .map_err(|err| RpcError::new(-32040, err))?;
     Ok(json!({"job":record,"note":"Worker completion is not proof verification"}))
 }
+async fn proof_job_get(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
+    let manager = gateway.jobs.as_ref()
+        .ok_or_else(|| RpcError::new(-32601, "proof job dispatcher not configured"))?;
+    let args = params.as_array()
+        .ok_or_else(|| RpcError::new(-32602, "expected [job_id,offset,max_bytes]"))?;
+    if args.len() != 3 {
+        return Err(RpcError::new(-32602, "expected [job_id,offset,max_bytes]"));
+    }
+    let id = args[0].as_str()
+        .ok_or_else(|| RpcError::new(-32602, "invalid job identifier"))?;
+    let offset = args[1].as_u64()
+        .ok_or_else(|| RpcError::new(-32602, "invalid chunk offset"))?;
+    let length = args[2].as_u64()
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| RpcError::new(-32602, "invalid chunk size"))?;
+    manager.result_chunk(id, offset, length).await
+        .map_err(|error| RpcError::new(-32042, error))
+}
+
 async fn proof_job_status(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
     let manager = gateway
         .jobs

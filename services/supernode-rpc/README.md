@@ -160,3 +160,20 @@ inferred from on-chain transaction inclusion alone.
 - zk.getproof: attested Raito proof artifacts and verified policy metadata.
 - zk.subscribe: a future push-subscription API over the tracked ZMQ sequence stream.
 - zk.getarkanchor: optional Ark adapter linking VTXO exits to on-chain anchors.
+
+
+## Proof result retention and bounded chunk retrieval
+
+The gateway now provides `zk.proof.get [job_id,offset,max_bytes]`. It returns
+hex-encoded chunks of at most 65,536 bytes, recomputing the full SHA-256 digest
+with a fixed-size streaming buffer and checking Bitcoin Core active-chain
+binding both before and after retrieval. Results are always labeled
+`proof_verified:false` until an independent verifier accepts them.
+
+Worker outputs are retained under a global 256 MiB storage cap, with oldest
+finished outputs evicted first and recorded as `output_evicted`. The job
+metadata and original result digest remain available for auditing. Failed,
+timed-out and interrupted workers have their input/output staging files
+cleaned; abandoned files are removed on startup. These budgets govern files
+**after** worker execution. Operators still need OS/cgroup memory and disk
+limits while proving jobs run.
