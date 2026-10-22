@@ -14,8 +14,9 @@ is restricted to loopback. PUB/SUB messages are not durable or authenticated.
 
 # Bitcoin Supernode RPC v0.2
 
-This is a separate Rust service providing a deliberately restricted
-JSON-RPC 2.0-compatible superset of Bitcoin Core read methods. It is designed
+This is a Rust service providing a restricted JSON-RPC 2.0-compatible superset
+of Bitcoin Core read methods, with separately authorized local artifact writes
+and proof-job submissions. It is designed
 for proof preparation and downstream clients such as Ark exits and custody
 watchtowers. The default service does not build Raito or Cairo dependencies.
 
@@ -26,12 +27,18 @@ Ark exit workflows, txindex=1 and access to historical blocks are typically
 needed. Block pruning limits historical proof preparation.
 
 Use either a Bitcoin Core RPC cookie file or user/password environment variables.
-The gateway requires its own independent bearer token and binds to loopback.
+The gateway requires a read bearer token and binds to loopback. If artifact
+storage or proof-job submission is enabled, it also requires a **distinct**
+`SUPERNODE_CONTROL_TOKEN` of at least 24 characters. Only that control token
+can call `zk.artifact.put` or `zk.proof.submit`. The ordinary read token
+can retrieve chain evidence, artifact bytes and completed **unverified**
+proof results. The gateway does not expose Bitcoin Core write RPCs.
 
 Example:
 
     export BITCOIN_RPC_COOKIE_FILE=/path/to/bitcoin/.cookie
     export SUPERNODE_RPC_TOKEN=replace-with-at-least-16-random-characters
+    export SUPERNODE_CONTROL_TOKEN=use-a-different-secret-at-least-24-characters
     cargo run --manifest-path services/supernode-rpc/Cargo.toml
 
 Health check: GET http://127.0.0.1:18444/healthz

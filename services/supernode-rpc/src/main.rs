@@ -45,6 +45,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tracker = Arc::new(ChainTracker::new(endpoint.is_some()));
     let mut gateway =
         Gateway::new(core.clone(), token, max_inflight)?.with_chain_tracker(tracker.clone());
+    let control = env::var("SUPERNODE_CONTROL_TOKEN").ok();
+    if env::var("SUPERNODE_ARTIFACT_DIR").is_ok() && control.is_none() {
+        return Err("SUPERNODE_CONTROL_TOKEN is required when artifact storage is enabled".into());
+    }
+    if let Some(control) = control {
+        gateway = gateway.with_control_token(control)?;
+    }
     let mut artifacts = None;
     if let Ok(root) = env::var("SUPERNODE_ARTIFACT_DIR") {
         let bytes: u64 = env::var("SUPERNODE_ARTIFACT_BUDGET_BYTES")

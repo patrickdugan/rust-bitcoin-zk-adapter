@@ -139,6 +139,7 @@ impl CoreRpc {
 pub struct Gateway {
     core: CoreRpc,
     gateway_token: String,
+    control_token: Option<String>,
     semaphore: Arc<Semaphore>,
     chain: Arc<chain::ChainTracker>,
     artifacts: Option<Arc<cache::ArtifactStore>>,
@@ -156,11 +157,22 @@ impl Gateway {
         Ok(Self {
             core,
             gateway_token,
+            control_token: None,
             semaphore: Arc::new(Semaphore::new(max_inflight)),
             chain: Arc::new(chain::ChainTracker::new(false)),
             artifacts: None,
             jobs: None,
         })
+    }
+
+    /// Operator bearer token for local disk writes and prover scheduling.
+    /// Read-only Bitcoin Core queries remain accessible to the read token.
+    pub fn with_control_token(mut self, token: String) -> Result<Self, String> {
+        if token.len() < 24 || constant_time_equal(token.as_bytes(), self.gateway_token.as_bytes()) {
+            return Err("control token must be at least 24 characters and distinct from the read token".into());
+        }
+        self.control_token = Some(token);
+        Ok(self)
     }
 
     pub fn with_job_manager(mut self, manager: Arc<jobs::JobManager>) -> Self {
@@ -222,6 +234,12 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
     difference == 0
 }
 
+/// A read credential never authorizes persistent local writes or launching
+/// high-memory proving workers. These methods require the control credential.
+pub fn requires_control_token(method: &str) -> bool {
+    matches!(method, "zk.artifact.put" | "zk.proof.submit")
+}
+
 fn error_reply(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -243,9 +261,12 @@ async fn rpc(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if !token
-        .map(|token| constant_time_equal(token.as_bytes(), state.gateway_token.as_bytes()))
-        .unwrap_or(false)
+    let read_authorized = token
+        .is_some_and(|token| constant_time_equal(token.as_bytes(), state.gateway_token.as_bytes()));
+    let control_authorized = token
+        .and_then(|token| state.control_token.as_deref().map(|control| (token, control)))
+        .is_some_and(|(token, control)| constant_time_equal(token.as_bytes(), control.as_bytes()));
+    if !read_authorized && !control_authorized
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -269,6 +290,17 @@ async fn rpc(
             "invalid request identifier or method",
         ))
         .into_response();
+    }
+    if requires_control_token(method) && !control_authorized {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error_reply(
+                id,
+                -32002,
+                "control authorization required for this method",
+            )),
+        )
+            .into_response();
     }
     let params = payload.get("params").cloned().unwrap_or_else(|| json!([]));
     if !params.is_array() {
@@ -308,6 +340,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
             "api":"supernode-rpc/0.1",
             "mode":"read_only",
             "bitcoin_core_proxy":true,
+            "auth": {"read_token":true,"separate_control_token_configured":gateway.control_token.is_some()},
             "transaction_context":true,
             "bounded_spend_context":true,
             "content_addressed_artifact_cache":gateway.artifacts.is_some(),
@@ -875,15 +908,19 @@ mod tests {
         format!("http://{address}")
     }
 
-    async fn query(url: &str, method: &str, params: Value) -> Value {
+    async fn query_with_token(url: &str, method: &str, params: Value, token: &str) -> Value {
         let response = reqwest::Client::new()
             .post(url)
-            .bearer_auth("0123456789abcdefTEST")
+            .bearer_auth(token)
             .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
             .send()
             .await
             .unwrap();
         response.json().await.unwrap()
+    }
+
+    async fn query(url: &str, method: &str, params: Value) -> Value {
+        query_with_token(url, method, params, "0123456789abcdefTEST").await
     }
 
     #[test]
@@ -905,6 +942,10 @@ mod tests {
         ] {
             assert!(!allowed_core_rpc(method));
         }
+        assert!(requires_control_token("zk.artifact.put"));
+        assert!(requires_control_token("zk.proof.submit"));
+        assert!(!requires_control_token("zk.proof.get"));
+        assert!(!requires_control_token("zk.gettxcontext"));
     }
 
     #[tokio::test]
@@ -961,16 +1002,26 @@ mod tests {
         let core = CoreRpc::new(&upstream, "testuser".into(), "testpass".into()).unwrap();
         let gateway = Gateway::new(core, "0123456789abcdefTEST".into(), 4)
             .unwrap()
+            .with_control_token("CONTROL-012345678901234567890")
+            .unwrap()
             .with_artifact_store(store)
             .with_chain_tracker(tracker.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, router(gateway)).await.unwrap() });
 
-        let put = query(
+        let denied = query(
             &endpoint,
             "zk.artifact.put",
             json!([900044, blockhash, "raito_input", "aabbccdd"]),
+        )
+        .await;
+        assert_eq!(denied["error"]["code"], -32002);
+        let put = query_with_token(
+            &endpoint,
+            "zk.artifact.put",
+            json!([900044, blockhash, "raito_input", "aabbccdd"]),
+            "CONTROL-012345678901234567890",
         )
         .await;
         assert_eq!(put["error"], Value::Null);
@@ -994,14 +1045,23 @@ mod tests {
         assert_eq!(second["error"], Value::Null);
         assert_eq!(second["result"]["revalidated_after_epoch_change"], true);
 
-        let rejected = query(
+        let rejected = query_with_token(
             &endpoint,
             "zk.artifact.put",
             json!([900044, "00".repeat(32), "raito_input", "aabb"]),
+            "CONTROL-012345678901234567890",
         )
         .await;
         assert_eq!(rejected["error"]["code"], -32014);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn control_token_must_not_reuse_read_token() {
+        let core = CoreRpc::new("http://127.0.0.1:1", "u".into(), "p".into()).unwrap();
+        let gateway = Gateway::new(core, "0123456789abcdefTEST".into(), 2).unwrap();
+        assert!(gateway.clone().with_control_token("0123456789abcdefTEST".into()).is_err());
+        assert!(gateway.with_control_token("short".into()).is_err());
     }
 
     #[tokio::test]

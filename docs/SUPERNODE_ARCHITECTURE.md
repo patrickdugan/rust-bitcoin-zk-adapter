@@ -40,8 +40,9 @@ than a transparent replacement for every Bitcoin Core RPC method.
   prevout scriptPubKeys and exact satoshi amounts for script execution.
   Uses a maximum of 256 inputs and four parent-transaction fetch tasks.
 
-The gateway currently exposes no broadcast/signing methods and runs on
-loopback with its own bearer token. The upstream Bitcoin Core connection
+The gateway exposes no Bitcoin broadcast/signing methods and runs on
+loopback with a read bearer token and a distinct control token for local
+artifact writes and proof-job submissions. The upstream Bitcoin Core connection
 also requires explicit credentials or cookie authentication and loopback
 access. Production access from other machines should use independently
 configured authenticated transport and review.
