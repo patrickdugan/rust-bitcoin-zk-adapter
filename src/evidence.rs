@@ -154,7 +154,6 @@ pub fn verify_litecoin_testnet_claim(claim: &InclusionClaim) -> Result<VerifiedI
     })
 }
 
-
 /// Read-only parser observation derived from a self-consistent inclusion claim.
 /// Parsing outcomes do not establish overlay consensus validity.
 #[derive(Debug, Clone, PartialEq, Eq)]

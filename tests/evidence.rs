@@ -92,7 +92,6 @@ fn rejects_invalid_transaction_bytes() {
     assert!(decode_hex_exact("ab", 0).is_err());
 }
 
-
 #[test]
 fn evidence_observes_non_tradelayer_mainnet_transaction_only_as_synthetic() {
     let observation =
@@ -128,7 +127,10 @@ fn synthetic_trade_layer_output_is_bound_to_merkle_inclusion() {
     claim.block_hash = header.block_hash().to_string();
     claim.block_header_hex = bitcoin::consensus::encode::serialize_hex(&header);
 
-    let output = observe_litecoin_testnet_claim(&claim).unwrap().outputs.remove(0);
+    let output = observe_litecoin_testnet_claim(&claim)
+        .unwrap()
+        .outputs
+        .remove(0);
     assert_eq!(
         output.strict,
         StrictOutcome::Envelope {
