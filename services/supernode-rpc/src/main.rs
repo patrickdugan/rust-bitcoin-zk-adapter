@@ -1,0 +1,38 @@
+//! Locally bound authenticated Bitcoin Core RPC superset.
+use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
+use std::{env, error::Error, net::SocketAddr};
+
+fn credential_pair() -> Result<(String, String), Box<dyn Error>> {
+    if let Ok(path) = env::var("BITCOIN_RPC_COOKIE_FILE") {
+        let cookie = std::fs::read_to_string(path)?;
+        let (username, password) = cookie
+            .trim()
+            .split_once(':')
+            .ok_or("invalid Bitcoin Core cookie format")?;
+        return Ok((username.to_owned(), password.to_owned()));
+    }
+    Ok((env::var("BITCOIN_RPC_USER")?, env::var("BITCOIN_RPC_PASSWORD")?))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let upstream = env::var("BITCOIN_RPC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8332".into());
+    let bind: SocketAddr = env::var("SUPERNODE_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:18444".into())
+        .parse()?;
+    if !bind.ip().is_loopback() {
+        return Err("Supernode v0.1 must bind to loopback".into());
+    }
+    let token = env::var("SUPERNODE_RPC_TOKEN")?;
+    let max_inflight = env::var("SUPERNODE_MAX_INFLIGHT")
+        .unwrap_or_else(|_| "4".into())
+        .parse()?;
+    let (username, password) = credential_pair()?;
+    let core = CoreRpc::new(&upstream, username, password)?;
+    let gateway = Gateway::new(core, token, max_inflight)?;
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    eprintln!("Bitcoin supernode RPC listening at {}", listener.local_addr()?);
+    axum::serve(listener, router(gateway)).await?;
+    Ok(())
+}

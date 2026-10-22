@@ -1,0 +1,23 @@
+name: Supernode RPC compatibility
+on:
+  push:
+    paths:
+      - 'services/supernode-rpc/**'
+      - '.github/workflows/supernode-rpc.yml'
+  pull_request:
+    paths:
+      - 'services/supernode-rpc/**'
+      - '.github/workflows/supernode-rpc.yml'
+  workflow_dispatch:
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --manifest-path services/supernode-rpc/Cargo.toml -- --check
+      - run: cargo test --manifest-path services/supernode-rpc/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path services/supernode-rpc/Cargo.toml --all-targets -- -D warnings

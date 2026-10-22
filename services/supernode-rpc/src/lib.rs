@@ -1,0 +1,509 @@
+//! Read-only Bitcoin Core RPC superset for proof preparation.
+//!
+//! Bitcoin Core remains authoritative for chain validation. This gateway
+//! locally verifies TXIDs, block-header hashes and transaction Merkle proofs.
+//! Neither these checks nor proxying Bitcoin Core RPC creates a STARK proof.
+
+use axum::{
+    extract::{DefaultBodyLimit, State},
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use bitcoin::consensus::deserialize;
+use bitcoin::{block::Header, BlockHash, MerkleBlock, Transaction, Txid};
+use reqwest::{redirect, Client, Url};
+use serde_json::{json, Value};
+use std::{str::FromStr, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
+
+pub const MAX_RPC_REQUEST_BYTES: usize = 64 * 1024;
+pub const MAX_RPC_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+pub const MAX_INFLIGHT_REQUESTS: usize = 8;
+
+#[derive(Debug, Clone)]
+pub struct RpcError {
+    pub code: i64,
+    pub message: String,
+}
+impl RpcError {
+    fn new(code: i64, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct CoreRpc {
+    client: Client,
+    url: Url,
+    username: String,
+    password: String,
+}
+
+impl CoreRpc {
+    pub fn new(url: &str, username: String, password: String) -> Result<Self, String> {
+        let url = Url::parse(url).map_err(|error| format!("invalid RPC URL: {error}"))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("Bitcoin RPC URL must be HTTP(S) with credentials supplied separately".into());
+        }
+        // Sidecar and Core should share a trust boundary. Remote Core can be
+        // enabled in a future release using a secure explicit transport policy.
+        if !matches!(url.host_str(), Some("127.0.0.1" | "::1" | "localhost")) {
+            return Err("Bitcoin RPC endpoint must be loopback".into());
+        }
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|error| format!("RPC HTTP client: {error}"))?;
+        Ok(Self {
+            client,
+            url,
+            username,
+            password,
+        })
+    }
+
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let request = json!({
+            "jsonrpc": "1.0",
+            "id": "supernode",
+            "method": method,
+            "params": params
+        });
+        let mut response = self
+            .client
+            .post(self.url.clone())
+            .basic_auth(&self.username, Some(&self.password))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| RpcError::new(-32010, format!("Bitcoin Core request failed: {error}")))?;
+
+        if let Some(length) = response.content_length() {
+            if length > MAX_RPC_RESPONSE_BYTES as u64 {
+                return Err(RpcError::new(-32011, "Bitcoin Core response exceeds size cap"));
+            }
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| RpcError::new(-32010, format!("Bitcoin Core response failed: {error}")))?
+        {
+            if chunk.len() > MAX_RPC_RESPONSE_BYTES.saturating_sub(body.len()) {
+                return Err(RpcError::new(-32011, "Bitcoin Core response exceeds size cap"));
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        let reply: Value = serde_json::from_slice(&body)
+            .map_err(|_| RpcError::new(-32012, "Malformed JSON from Bitcoin Core"))?;
+        if let Some(error) = reply.get("error").filter(|value| !value.is_null()) {
+            let code = error.get("code").and_then(Value::as_i64).unwrap_or(-32010);
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Bitcoin Core RPC error");
+            return Err(RpcError::new(code, message));
+        }
+        reply
+            .get("result")
+            .cloned()
+            .ok_or_else(|| RpcError::new(-32012, "Bitcoin Core RPC result absent"))
+    }
+}
+
+#[derive(Clone)]
+pub struct Gateway {
+    core: CoreRpc,
+    gateway_token: String,
+    semaphore: Arc<Semaphore>,
+}
+
+impl Gateway {
+    pub fn new(core: CoreRpc, gateway_token: String, max_inflight: usize) -> Result<Self, String> {
+        if gateway_token.len() < 16 {
+            return Err("gateway token must contain at least 16 characters".into());
+        }
+        if max_inflight == 0 || max_inflight > MAX_INFLIGHT_REQUESTS {
+            return Err("invalid concurrent request limit".into());
+        }
+        Ok(Self {
+            core,
+            gateway_token,
+            semaphore: Arc::new(Semaphore::new(max_inflight)),
+        })
+    }
+}
+
+pub fn router(gateway: Gateway) -> Router {
+    Router::new()
+        .route("/", post(rpc))
+        .route("/healthz", get(|| async { Json(json!({"status":"alive"})) }))
+        .layer(DefaultBodyLimit::max(MAX_RPC_REQUEST_BYTES))
+        .with_state(Arc::new(gateway))
+}
+
+/// Deliberate read-only subset of Bitcoin Core's standard RPC commands.
+/// Wallet, signing, shutdown, broadcasting, mining and expensive mutable
+/// scans are outside this v0.1 interface.
+pub fn allowed_core_rpc(method: &str) -> bool {
+    matches!(
+        method,
+        "getblockchaininfo"
+            | "getblockcount"
+            | "getbestblockhash"
+            | "getblockhash"
+            | "getblockheader"
+            | "getblock"
+            | "getrawtransaction"
+            | "gettxoutproof"
+            | "gettxout"
+            | "getindexinfo"
+            | "getblockfilter"
+            | "getrawmempool"
+            | "getmempoolentry"
+            | "getmempoolinfo"
+            | "getchaintips"
+    )
+}
+
+fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
+    let mut difference = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        difference |= usize::from(*a.get(i).unwrap_or(&0) ^ *b.get(i).unwrap_or(&0));
+    }
+    difference == 0
+}
+
+fn error_reply(id: Value, code: i64, message: impl Into<String>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": null,
+        "error": {"code":code,"message":message.into()}
+    })
+}
+fn success_reply(id: Value, result: Value) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"result":result,"error":null})
+}
+
+async fn rpc(
+    State(state): State<Arc<Gateway>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if !token
+        .map(|token| constant_time_equal(token.as_bytes(), state.gateway_token.as_bytes()))
+        .unwrap_or(false)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(error_reply(Value::Null, -32001, "gateway authorization required")),
+        )
+            .into_response();
+    }
+
+    let id = payload.get("id").cloned().unwrap_or(Value::Null);
+    let Some(method) = payload.get("method").and_then(Value::as_str) else {
+        return Json(error_reply(id, -32600, "missing JSON-RPC method")).into_response();
+    };
+    if payload.get("id").is_none() || method.len() > 80 {
+        return Json(error_reply(id, -32600, "invalid request identifier or method")).into_response();
+    }
+    let params = payload.get("params").cloned().unwrap_or_else(|| json!([]));
+    if !params.is_array() {
+        return Json(error_reply(id, -32602, "params must be a JSON array")).into_response();
+    }
+    if !allowed_core_rpc(method) && !method.starts_with("zk.") {
+        return Json(error_reply(id, -32601, "method unavailable in read-only gateway"))
+            .into_response();
+    }
+    let Ok(_permit) = state.semaphore.clone().try_acquire_owned() else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_reply(id, -32020, "gateway request capacity exhausted")),
+        )
+            .into_response();
+    };
+    let result = execute(&state.core, method, params).await;
+    Json(match result {
+        Ok(value) => success_reply(id, value),
+        Err(error) => error_reply(id, error.code, error.message),
+    })
+    .into_response()
+}
+
+async fn execute(core: &CoreRpc, method: &str, params: Value) -> Result<Value, RpcError> {
+    match method {
+        "zk.capabilities" => Ok(json!({
+            "api":"supernode-rpc/0.1",
+            "mode":"read_only",
+            "bitcoin_core_proxy":true,
+            "transaction_context":true,
+            "bitcoin_merkle_proof_checked":true,
+            "raito": {"proof_verifier_connected":false, "job_queue_connected":false},
+            "shinigami": {"script_prover_connected":false},
+            "ark": {"vtxo_index_connected":false},
+            "limits": {"inflight_requests":MAX_INFLIGHT_REQUESTS,
+                       "rpc_response_bytes":MAX_RPC_RESPONSE_BYTES}
+        })),
+        "zk.nodeprofile" => {
+            let (chain, indexes, mempool) = tokio::try_join!(
+                core.call("getblockchaininfo", json!([])),
+                core.call("getindexinfo", json!([])),
+                core.call("getmempoolinfo", json!([]))
+            )?;
+            Ok(json!({"chain":chain,"indexes":indexes,"mempool":mempool}))
+        }
+        "zk.gettxcontext" => tx_context(core, &params).await,
+        name if allowed_core_rpc(name) => core.call(name, params).await,
+        _ => Err(RpcError::new(-32601, "unknown zk method")),
+    }
+}
+
+/// Retrieves a Bitcoin Core-confirmed tx by explicit block hash, then binds
+/// it to the supplied block header and consensus-encoded PartialMerkleTree.
+/// Re-checks the active-chain block hash for the height at response time.
+pub async fn tx_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcError> {
+    let args = params
+        .as_array()
+        .ok_or_else(|| RpcError::new(-32602, "expected [txid, blockhash]"))?;
+    if args.len() != 2 {
+        return Err(RpcError::new(-32602, "expected exactly [txid, blockhash]"));
+    }
+    let txid_text = args[0]
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32602, "txid must be a hash string"))?;
+    let block_text = args[1]
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32602, "blockhash must be a hash string"))?;
+    let expected_txid = Txid::from_str(txid_text)
+        .map_err(|_| RpcError::new(-32602, "invalid Bitcoin txid"))?;
+    let expected_hash = BlockHash::from_str(block_text)
+        .map_err(|_| RpcError::new(-32602, "invalid Bitcoin blockhash"))?;
+    let txid_text = expected_txid.to_string();
+    let block_text = expected_hash.to_string();
+
+    let (rawtx, proof, header, header_info, chain_info) = tokio::try_join!(
+        core.call("getrawtransaction", json!([txid_text,false,block_text])),
+        core.call("gettxoutproof", json!([[txid_text],block_text])),
+        core.call("getblockheader", json!([block_text,false])),
+        core.call("getblockheader", json!([block_text,true])),
+        core.call("getblockchaininfo", json!([]))
+    )?;
+    let rawtx = rawtx
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32012, "raw transaction missing from Bitcoin Core"))?;
+    let proof_hex = proof
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32012, "Merkle proof missing from Bitcoin Core"))?;
+    let header_hex = header
+        .as_str()
+        .ok_or_else(|| RpcError::new(-32012, "block header missing from Bitcoin Core"))?;
+    let decode_hex = |value: &str| {
+        hex::decode(value).map_err(|_| RpcError::new(-32013, "invalid hexadecimal Bitcoin Core result"))
+    };
+    let tx_bytes = decode_hex(rawtx)?;
+    let transaction: Transaction = deserialize(&tx_bytes)
+        .map_err(|_| RpcError::new(-32013, "Bitcoin Core transaction cannot be decoded"))?;
+    if transaction.compute_txid() != expected_txid {
+        return Err(RpcError::new(-32013, "raw transaction hash mismatch"));
+    }
+
+    let header_bytes = decode_hex(header_hex)?;
+    if header_bytes.len() != 80 {
+        return Err(RpcError::new(-32013, "Bitcoin block header must be 80 bytes"));
+    }
+    let block_header: Header = deserialize(&header_bytes)
+        .map_err(|_| RpcError::new(-32013, "Bitcoin block header cannot be decoded"))?;
+    if block_header.block_hash() != expected_hash {
+        return Err(RpcError::new(-32013, "Bitcoin block header hash mismatch"));
+    }
+
+    let proof_bytes = decode_hex(proof_hex)?;
+    let merkle: MerkleBlock = deserialize(&proof_bytes)
+        .map_err(|_| RpcError::new(-32013, "Bitcoin Merkle proof cannot be decoded"))?;
+    if merkle.header != block_header {
+        return Err(RpcError::new(-32013, "Merkle proof header mismatch"));
+    }
+    let mut matches = Vec::new();
+    let mut positions = Vec::new();
+    merkle
+        .extract_matches(&mut matches, &mut positions)
+        .map_err(|_| RpcError::new(-32013, "Bitcoin Merkle proof invalid"))?;
+    if matches.len() != 1 || positions.len() != 1 || matches[0] != expected_txid {
+        return Err(RpcError::new(-32013, "Merkle proof does not bind exactly the requested TXID"));
+    }
+
+    let height = header_info
+        .get("height")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| RpcError::new(-32012, "Bitcoin Core header height missing"))?;
+    let confirmations = header_info
+        .get("confirmations")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| RpcError::new(-32012, "Bitcoin Core confirmations missing"))?;
+    if confirmations <= 0 {
+        return Err(RpcError::new(-32014, "block is not on Bitcoin Core active chain"));
+    }
+    let active_hash = core.call("getblockhash", json!([height])).await?;
+    if active_hash.as_str() != Some(block_text.as_str()) {
+        return Err(RpcError::new(-32014, "Bitcoin active chain changed while building context"));
+    }
+
+    Ok(json!({
+        "network":chain_info.get("chain"),
+        "txid":txid_text,
+        "blockhash":block_text,
+        "block_height":height,
+        "confirmations_at_lookup":confirmations,
+        "transaction_index":positions[0],
+        "raw_transaction_hex":rawtx,
+        "block_header_hex":header_hex,
+        "txoutproof_hex":proof_hex,
+        "proof_kind":"bitcoin_partial_merkle_tree",
+        "merkle_inclusion_checked":true,
+        "core_active_chain_at_lookup":true,
+        "raito_stark_proof":null,
+        "shinigami_execution_proof":null,
+        "canonicality_note":"Bitcoin Core view at lookup time; finality and fresh tip checks belong to consumer"
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::{constants::genesis_block, hashes::Hash, merkle_tree::PartialMerkleTree, Network, TxMerkleNode};
+    use tokio::net::TcpListener;
+
+    async fn mock_core() -> (String, String, String) {
+        let tx_hex = include_str!("../../../fixtures/mainnet/2033435de7ce307341231e818ed937cd3a5e8597381fd83a7e5b0234f61b38d3.hex").trim().to_owned();
+        let tx: Transaction = deserialize(&hex::decode(&tx_hex).unwrap()).unwrap();
+        let txid = tx.compute_txid();
+        let mut header = genesis_block(Network::Bitcoin).header;
+        header.merkle_root = TxMerkleNode::from_byte_array(txid.to_byte_array());
+        let hash = header.block_hash().to_string();
+        let header_hex = bitcoin::consensus::encode::serialize_hex(&header);
+        let proof = MerkleBlock {
+            header,
+            txn: PartialMerkleTree::from_txids(&[txid], &[true]),
+        };
+        let proof_hex = bitcoin::consensus::encode::serialize_hex(&proof);
+        let txid_string = txid.to_string();
+        let block_hash = hash.clone();
+        let mock = Router::new().route("/", post(move |Json(body): Json<Value>| {
+            let rawtx = tx_hex.clone();
+            let raw_header = header_hex.clone();
+            let raw_proof = proof_hex.clone();
+            let hash = block_hash.clone();
+            async move {
+                let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+                let result = match method {
+                    "getrawtransaction" => json!(rawtx),
+                    "gettxoutproof" => json!(raw_proof),
+                    "getblockheader" => {
+                        if body["params"][1] == false {
+                            json!(raw_header)
+                        } else {
+                            json!({"height":900044,"confirmations":3})
+                        }
+                    }
+                    "getblockhash" => json!(hash),
+                    "getblockchaininfo" => json!({"chain":"regtest","blocks":900046,"initialblockdownload":false}),
+                    "getindexinfo" => json!({"txindex":{"synced":true}}),
+                    "getmempoolinfo" => json!({"size":0}),
+                    _ => Value::Null,
+                };
+                Json(json!({"result":result,"error":null,"id":"supernode"}))
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.unwrap();
+        });
+        (format!("http://{address}"), txid_string, hash)
+    }
+
+    async fn start_gateway(upstream: &str) -> String {
+        let core = CoreRpc::new(upstream, "testuser".into(), "testpass".into()).unwrap();
+        let gateway = Gateway::new(core, "0123456789abcdefTEST".into(), 4).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router(gateway)).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    async fn query(url: &str, method: &str, params: Value) -> Value {
+        let response = reqwest::Client::new()
+            .post(url)
+            .bearer_auth("0123456789abcdefTEST")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+            .send()
+            .await
+            .unwrap();
+        response.json().await.unwrap()
+    }
+
+    #[test]
+    fn default_read_only_method_policy() {
+        for method in ["getblock", "getrawtransaction", "gettxoutproof", "getindexinfo"] {
+            assert!(allowed_core_rpc(method));
+        }
+        for method in ["sendrawtransaction", "stop", "dumpprivkey", "submitblock", "testmempoolaccept"] {
+            assert!(!allowed_core_rpc(method));
+        }
+    }
+
+    #[tokio::test]
+    async fn node_profile_and_method_denial() {
+        let (upstream, _, _) = mock_core().await;
+        let gateway = start_gateway(&upstream).await;
+        let profile = query(&gateway, "zk.nodeprofile", json!([])).await;
+        assert_eq!(profile["result"]["chain"]["chain"], "regtest");
+        let denied = query(&gateway, "sendrawtransaction", json!(["deadbeef"])).await;
+        assert_eq!(denied["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn proved_tx_context_requires_consistent_merkle_and_core_chain() {
+        let (upstream, txid, hash) = mock_core().await;
+        let gateway = start_gateway(&upstream).await;
+        let answer = query(&gateway, "zk.gettxcontext", json!([txid, hash])).await;
+        assert_eq!(answer["error"], Value::Null);
+        assert_eq!(answer["result"]["transaction_index"], 0);
+        assert_eq!(answer["result"]["merkle_inclusion_checked"], true);
+        assert_eq!(answer["result"]["network"], "regtest");
+    }
+
+    #[tokio::test]
+    async fn invalid_context_input_fails_before_rpc_and_gateway_requires_bearer() {
+        let (upstream, _, _) = mock_core().await;
+        let gateway = start_gateway(&upstream).await;
+        let invalid = query(&gateway, "zk.gettxcontext", json!(["bad-txid","00"])).await;
+        assert_eq!(invalid["error"]["code"], -32602);
+        let unauth = reqwest::Client::new()
+            .post(&gateway)
+            .json(&json!({"id":1,"method":"getblockcount","params":[]}))
+            .send().await.unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+    }
+}

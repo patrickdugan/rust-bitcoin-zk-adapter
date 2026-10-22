@@ -22,6 +22,13 @@ Heavy Cairo/STWO verification dependencies live in the separately built
 [optional Raito integration](integrations/raito/), pinned to an upstream commit.
 The default sidecar stays small and compiles without them.
 
+## Bitcoin Supernode RPC
+
+The [read-only Supernode RPC service](services/supernode-rpc/README.md)
+provides proof-ready Bitcoin Core data access in Rust. It implements
+namespaced transaction-inclusion bundles, backend capability reporting and
+node/index discovery. Heavy proving remains isolated in external workers.
+
 ## Available functionality
 
 - Extract OP_RETURN outputs from raw Bitcoin transactions and blocks.
