@@ -17,7 +17,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = verify_litecoin_testnet_claim(&claim)?;
     println!("claim self-consistency: OK (canonical chain status unverified)");
     println!("Litecoin testnet txid: {}", result.txid);
-    println!("Supplied block: {} at height {}", result.block_hash, result.block_height);
+    println!(
+        "Supplied block: {} at height {}",
+        result.block_hash, result.block_height
+    );
     println!("Transaction index: {}", result.tx_index);
     println!("OP_RETURN vouts: {:?}", result.op_return_outputs);
     Ok(())

@@ -82,9 +82,7 @@ pub fn decode_hex_exact(hex: &str, limit: usize) -> Result<Vec<u8>, String> {
 /// genesis_hash is checked against Litecoin Core's testnet genesis constant,
 /// but no path from the supplied header to that genesis is verified here.
 /// The exporter is responsible for obtaining the block from a trusted node.
-pub fn verify_litecoin_testnet_claim(
-    claim: &InclusionClaim,
-) -> Result<VerifiedInclusion, String> {
+pub fn verify_litecoin_testnet_claim(claim: &InclusionClaim) -> Result<VerifiedInclusion, String> {
     if claim.schema_version != SCHEMA_VERSION {
         return Err("unsupported evidence schema version".into());
     }
@@ -125,10 +123,11 @@ pub fn verify_litecoin_testnet_claim(
     if claim.transaction_count == 0 || claim.merkle_siblings.len() > 32 {
         return Err("invalid block transaction count or branch depth".into());
     }
-    let siblings = claim.merkle_siblings.iter()
+    let siblings = claim
+        .merkle_siblings
+        .iter()
         .map(|value| {
-            TxMerkleNode::from_str(value)
-                .map_err(|error| format!("bad Merkle sibling: {error}"))
+            TxMerkleNode::from_str(value).map_err(|error| format!("bad Merkle sibling: {error}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     verify_tx_in_header(
@@ -144,9 +143,7 @@ pub fn verify_litecoin_testnet_claim(
         .output
         .iter()
         .enumerate()
-        .filter_map(|(vout, output)| {
-            output.script_pubkey.is_op_return().then_some(vout as u32)
-        })
+        .filter_map(|(vout, output)| output.script_pubkey.is_op_return().then_some(vout as u32))
         .collect();
 
     Ok(VerifiedInclusion {

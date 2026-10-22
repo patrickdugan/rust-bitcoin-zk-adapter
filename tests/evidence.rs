@@ -7,8 +7,9 @@ use rust_bitcoin_zk_adapter::evidence::{
 };
 
 const GENESIS_HEADER: &str = include_str!("../fixtures/litecoin_testnet/genesis_header.hex");
-const TX_HEX: &str =
-    include_str!("../fixtures/mainnet/2033435de7ce307341231e818ed937cd3a5e8597381fd83a7e5b0234f61b38d3.hex");
+const TX_HEX: &str = include_str!(
+    "../fixtures/mainnet/2033435de7ce307341231e818ed937cd3a5e8597381fd83a7e5b0234f61b38d3.hex"
+);
 
 /// A synthetic claim using a Bitcoin transaction and an altered Litecoin
 /// testnet genesis header. This deliberately claims NO real Litecoin block.
@@ -17,8 +18,7 @@ fn synthetic_claim() -> InclusionClaim {
     let tx: Transaction = deserialize(&raw_tx).unwrap();
     let bytes = decode_hex_exact(GENESIS_HEADER.trim(), 80).unwrap();
     let mut header: Header = deserialize(&bytes).unwrap();
-    header.merkle_root =
-        TxMerkleNode::from_byte_array(tx.compute_txid().to_byte_array());
+    header.merkle_root = TxMerkleNode::from_byte_array(tx.compute_txid().to_byte_array());
 
     let hex = bitcoin::consensus::encode::serialize_hex(&header);
     InclusionClaim {
