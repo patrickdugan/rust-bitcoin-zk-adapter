@@ -173,8 +173,10 @@ inferred from on-chain transaction inclusion alone.
 
 The gateway now provides `zk.proof.get [job_id,offset,max_bytes]`. It returns
 hex-encoded chunks of at most 65,536 bytes, recomputing the full SHA-256 digest
-with a fixed-size streaming buffer and checking Bitcoin Core active-chain
-binding both before and after retrieval. Results are always labeled
+with a fixed-size streaming buffer for legacy results, or checking only
+requested 64 KiB chunks against a SHA-256-index committed when the worker
+finished. Both paths check Bitcoin Core active-chain binding before and
+after retrieval. Results are always labeled
 `proof_verified:false` until an independent verifier accepts them.
 
 Worker outputs are retained under a global 256 MiB storage cap, with oldest
@@ -184,3 +186,12 @@ timed-out and interrupted workers have their input/output staging files
 cleaned; abandoned files are removed on startup. These budgets govern files
 **after** worker execution. Operators still need OS/cgroup memory and disk
 limits while proving jobs run.
+
+
+Proof workers generate a compact binary `.chunks` hash index alongside each
+completed output; the job record commits to its SHA-256. Validating this small
+index and the requested chunks avoids rereading a full 64 MiB proof for each
+small RPC response. Clients should still recompute the original whole-output
+SHA-256 after assembling all chunks. The chunk index authenticates bytes
+against the locally recorded worker output, **not** the proof statement.
+
