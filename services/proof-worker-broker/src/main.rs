@@ -345,7 +345,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Reject other local identities before spawning a task or using a
         // worker semaphore. The Unix socket's group includes the broker UID,
         // but only the gateway UID may submit a proof computation.
-        if stream.peer_cred().map(|cred| cred.uid()) != Ok(config.gateway_uid) {
+        if !stream
+            .peer_cred()
+            .is_ok_and(|cred| cred.uid() == config.gateway_uid)
+        {
             continue;
         }
         let config = Arc::clone(&config);
