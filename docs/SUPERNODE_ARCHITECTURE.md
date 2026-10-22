@@ -108,9 +108,11 @@ height-to-hash lookups across reorgs.
 ## Verified statement boundary
 
 An approved Raito worker supplies a compressed SPV artifact to the
-dispatcher. A separately installed and SHA-256-pinned verifier executable
-runs the upstream Raito STARK verifier in non-development mode with a fixed
-`VerifierConfig`. Successful receipt publication requires an expected TXID,
+dispatcher. Optional Unix producer and verifier brokers put proof generation
+and STARK verification under independent unprivileged service UIDs, with a
+third gateway UID owning durable metadata. The verifier service launches
+an operator-pinned Raito executable in non-development mode with a fixed
+`VerifierConfig` after checking the uploaded compressed proof SHA-256. Successful receipt publication requires an expected TXID,
 the proof file's SHA-256, the Bitcoin Core-active block hash and height, and
 the policy configuration digest to agree. Without that verification, the job
 stays `completed_unverified`.
@@ -120,8 +122,9 @@ under Raito's policy, with its TXID, block hash, chain proof height and index.
 It is distinct from economic canonical-chain choice and from full Bitcoin
 consensus execution. The read-only `zk.proof.receipt` endpoint rechecks the
 active chain before returning a statement, including after output eviction.
-Live proof acceptance remains an operator-run integration test, and OS memory
-isolation is still required for prover and verifier binaries.
+Synthetic three-UID IPC and filesystem-isolation regression tests pass in CI.
+Live proof acceptance remains an operator-run integration test. OS memory,
+process and filesystem limits must still be applied by the service manager.
 
 ## Planned interfaces
 

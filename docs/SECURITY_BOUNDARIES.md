@@ -25,9 +25,18 @@ validation are separate policies.
 
 Proof-generating workers are a lower-trust component. A worker can emit
 arbitrary bytes and must never be able to create an accepted proof
-statement by editing a job record. During development, the dispatcher
-runs workers as subprocesses; **a subprocess normally inherits the
-gateway's operating-system UID and can access same-UID files**.
+statement by editing a job record. In legacy direct-execution mode,
+the dispatcher launches workers and the verifier under the gateway UID.
+This requires an explicit development override because **same-UID
+subprocesses can access and alter same-UID files**.
+
+An opt-in producer broker and an independently isolated STARK verifier
+are implemented under `services/proof-worker-broker` and
+`services/raito-verifier-broker`. Their Unix socket peers authenticate
+each other's kernel UIDs and must be provisioned as distinct
+unprivileged accounts. Isolated mode is enabled through the gateway's
+`SUPERNODE_PROOF_BROKER_SOCKET` and `SUPERNODE_PROOF_VERIFIER_SOCKET`
+configuration, together with their expected service UIDs.
 
 The job directory is permissioned `0700`, which protects it from other
 Unix users. These permissions provide **no isolation against a worker
@@ -53,14 +62,19 @@ staging and require an OS-enforced identity or sandbox boundary:
    records or attestation state.
 4. The Raito verifier must run from the operator-pinned binary with the
    chosen policy, and the gateway must accept only verifier-origin results.
-   Consider a separately privileged verifier service or cryptographically
-   authenticated receipts for cross-service IPC.
+   The optional separate-UID verifier service is implemented. Its socket
+   authenticates peers through kernel credentials, while each end validates
+   the full typed receipt and proof hash.
 5. Test forged-job-file and compromised-prover scenarios after enforcing
    the boundary. Keep the draft PR out of production until this is proven.
 
-This is a deployment blocker for untrusted proof workers. A shell script
-that only sets `chmod 0700` on the existing job directory does not solve
-same-UID write access.
+The optional three-identity deployment provides the intended filesystem
+boundary for untrusted producers and STARK-verifier processes. CI tests
+exercise this with synthetic bytes and malicious mock processes under
+separate Linux accounts. Operators must apply the corresponding filesystem
+ownership, kernel process isolation and hard resource limits before using
+the configuration with untrusted external proofs. A `chmod 0700` job
+directory alone cannot isolate a worker with the gateway's own UID.
 
 ## Worker lifetime and resource limits
 
@@ -100,7 +114,8 @@ alone as evidence of STARK validity.
 
 ## Acceptance gates
 
-- All six Rust/Python workflows pass on the PR's exact head.
+- All relevant Rust, Python, broker and verifier workflows pass on the
+  PR's exact head, including separate-UID Unix integration tests.
 - One genuine compressed Raito SPV proof fetched from the operator's
   mainnet node yields a typed receipt under the pinned verifier.
 - Negative cases for invalid transaction, block, chain freshness, policy,
@@ -114,4 +129,5 @@ alone as evidence of STARK validity.
 
 See [the live benchmark instructions](LIVE_SUPERNODE_BENCHMARK.md),
 [the Supernode architecture](SUPERNODE_ARCHITECTURE.md), and
-[the Raito fetch worker](../integrations/raito-fetcher/README.md).
+[the Raito fetch worker](../integrations/raito-fetcher/README.md), and
+[the isolated verifier service](../services/raito-verifier-broker/README.md).
