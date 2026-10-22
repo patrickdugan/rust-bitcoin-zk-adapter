@@ -243,3 +243,19 @@ The default Raito integration is optional and off unless configured.
 Both fetch and verification need OS-level limits covering descendants, plus
 per-job disk quotas. The current memory reservation and post-execution
 result cap are admission/retention controls, not hard runtime isolation.
+
+
+### Verification-pending state and recovery
+
+A Raito job configured with both an expected TXID and a pinned verifier enters
+`verifying_raito` when it has finished producing the compressed proof. It
+serves hash-indexed chunks labeled `proof_verified:false` during that phase.
+After a positive Cairo/STWO verifier result and an active-chain recheck it
+becomes `verified_raito`. A verifier rejection returns the job to
+`completed_unverified` with an error, retaining the untrusted bytes under
+the output quota.
+
+A gateway restart during `verifying_raito` likewise restores the job to
+`completed_unverified` without promoting the statement or automatically
+replaying the expensive verifier. Legacy completed outputs remain unverified
+until an independent verifier accepts them.

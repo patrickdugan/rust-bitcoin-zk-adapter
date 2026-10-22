@@ -205,7 +205,7 @@ fn prune_result_files(
     for (id, record) in records.iter_mut() {
         if !matches!(
             record.status,
-            JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+            JobStatus::CompletedUnverified | JobStatus::VerifyingRaito | JobStatus::VerifiedRaito
         ) {
             continue;
         }
@@ -268,6 +268,7 @@ pub enum JobStatus {
     Queued,
     Running,
     CompletedUnverified,
+    VerifyingRaito,
     VerifiedRaito,
     OutputEvicted,
     Failed,
@@ -435,6 +436,14 @@ impl JobManager {
             if record.id != id {
                 continue;
             }
+            if record.status == JobStatus::VerifyingRaito {
+                // Preserve a complete proof artifact after a gateway crash.
+                // A verifier may have been killed during restart; its result
+                // was never durably accepted as a verified statement.
+                record.status = JobStatus::CompletedUnverified;
+                record.error = Some("gateway restarted during Raito verification".into());
+                atomic_json(&root, &record)?;
+            }
             if matches!(record.status, JobStatus::Queued | JobStatus::Running) {
                 record.status = JobStatus::Interrupted;
                 record.error = Some("gateway restarted; job must be resubmitted".into());
@@ -468,7 +477,7 @@ impl JobManager {
                     && !records.get(id).is_some_and(|r| {
                         matches!(
                             r.status,
-                            JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+                            JobStatus::CompletedUnverified | JobStatus::VerifyingRaito | JobStatus::VerifiedRaito
                         )
                     })
             }) || name.strip_suffix(".input").is_some_and(is_hash)
@@ -477,7 +486,7 @@ impl JobManager {
                         && !records.get(id).is_some_and(|record| {
                             matches!(
                                 record.status,
-                                JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+                                JobStatus::CompletedUnverified | JobStatus::VerifyingRaito | JobStatus::VerifiedRaito
                             )
                         })
                 });
@@ -509,6 +518,7 @@ impl JobManager {
             "raito_worker_configured":self.workers.enabled(&JobKind::Raito),
             "raito_verifier_configured":self.raito_verifier.is_some(),
             "raito_fetch_configured":self.raito_fetch_config.is_some(),
+            "typed_raito_receipts_enabled":self.raito_verifier.is_some(),
             "shinigami_worker_configured":self.workers.enabled(&JobKind::Shinigami),
             "max_pending":MAX_PENDING_JOBS,
             "max_worker_count":self.worker_count,
@@ -691,7 +701,7 @@ impl JobManager {
                 eprintln!("Could not persist proof job status: {err}");
             }
         }
-        if status == JobStatus::CompletedUnverified {
+        if matches!(status, JobStatus::CompletedUnverified | JobStatus::VerifyingRaito) {
             if let Err(err) =
                 prune_result_files(&self.root, &mut records, MAX_RETAINED_RESULT_BYTES)
             {
@@ -709,8 +719,8 @@ impl JobManager {
     ) -> Result<(), String> {
         let mut state = self.records.lock().await;
         let record = state.get(id).ok_or("verified job missing")?;
-        if record.status != JobStatus::CompletedUnverified {
-            return Err("job output was evicted before verification completed".into());
+        if record.status != JobStatus::VerifyingRaito {
+            return Err("job output was evicted or verification was interrupted".into());
         }
         let digest = record
             .result_sha256
@@ -770,7 +780,7 @@ impl JobManager {
         let record = self.status(id).await?;
         if !matches!(
             record.status,
-            JobStatus::CompletedUnverified | JobStatus::VerifiedRaito
+            JobStatus::CompletedUnverified | JobStatus::VerifyingRaito | JobStatus::VerifiedRaito
         ) {
             return Err("job does not have a retained completed result".into());
         }
@@ -909,16 +919,23 @@ impl JobManager {
         }
         match result {
             Ok((digest, size, index_digest)) => {
+                let should_verify = record.kind == JobKind::Raito
+                    && self.raito_verifier.is_some()
+                    && record.expected_txid.is_some();
                 self.set_status(
                     &id,
-                    JobStatus::CompletedUnverified,
+                    if should_verify {
+                        JobStatus::VerifyingRaito
+                    } else {
+                        JobStatus::CompletedUnverified
+                    },
                     Some(digest.clone()),
                     Some(size),
                     Some(index_digest),
                     None,
                 )
                 .await;
-                if record.kind == JobKind::Raito {
+                if should_verify {
                     if let (Some(verifier), Some(_)) =
                         (&self.raito_verifier, record.expected_txid.as_ref())
                     {
@@ -951,8 +968,9 @@ impl JobManager {
                             let mut state = self.records.lock().await;
                             if let Some(current) = state
                                 .get_mut(&id)
-                                .filter(|r| r.status == JobStatus::CompletedUnverified)
+                                .filter(|r| r.status == JobStatus::VerifyingRaito)
                             {
+                                current.status = JobStatus::CompletedUnverified;
                                 current.error = Some(format!("Raito verification: {err}"));
                                 if let Err(e) = atomic_json(&self.root, current) {
                                     eprintln!("Could not persist verification error: {e}");
@@ -1065,6 +1083,45 @@ mod tests {
         assert!(!abandoned_index.exists());
         let status = restarted.status(&record.id).await.unwrap();
         assert_eq!(status.status, JobStatus::Interrupted);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+
+    #[tokio::test]
+    async fn interrupted_raito_verification_preserves_unverified_proof_and_hashes() {
+        let dir = tmp("verifier-recovery");
+        let initial = manager(&dir);
+        let id = "24".repeat(32);
+        let bytes = b"synthetic-unverified-stark-bytes";
+        fs::write(initial.root.join(format!("{id}.output")), bytes).unwrap();
+        let record = JobRecord {
+            id: id.clone(),
+            kind: JobKind::Raito,
+            input_artifact_id: "cd".repeat(32),
+            network: "regtest".into(),
+            block_hash: "ab".repeat(32),
+            block_height: 13,
+            chain_epoch: 0,
+            policy_sha256: "ef".repeat(32),
+            estimated_memory_mib: 1,
+            expected_txid: Some("12".repeat(32)),
+            status: JobStatus::VerifyingRaito,
+            result_sha256: Some(hash_bytes(bytes)),
+            result_bytes: Some(bytes.len() as u64),
+            result_chunk_index_sha256: None,
+            verified_raito: None,
+            error: None,
+            submitted_unix: 1,
+            finished_unix: None,
+        };
+        atomic_json(&initial.root, &record).unwrap();
+        drop(initial);
+        let restarted = manager(&dir);
+        let state = restarted.status(&id).await.unwrap();
+        assert_eq!(state.status, JobStatus::CompletedUnverified);
+        assert_eq!(state.result_sha256, Some(hash_bytes(bytes)));
+        assert!(state.verified_raito.is_none());
+        assert!(restarted.root.join(format!("{id}.output")).exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
