@@ -1,6 +1,9 @@
 name: Raito integration compatibility
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 'integrations/raito/**'
 jobs:
   check:
     runs-on: ubuntu-latest

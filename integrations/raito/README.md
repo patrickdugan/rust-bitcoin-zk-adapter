@@ -29,3 +29,5 @@ result is limited to the upstream proof statement and configured work bound.
 
 **Status:** implementation scaffold. Its heavy backend must pass its own
 build check before claiming compatibility with the pinned upstream revision.
+
+Compatibility CI runs for changes to this integration directory.
