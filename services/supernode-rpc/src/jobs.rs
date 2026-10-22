@@ -883,7 +883,7 @@ mod tests {
         assert_eq!(tail, data[MAX_RESULT_CHUNK_BYTES * 2..]);
 
         let mut tampered = data;
-        tampered[MAX_RESULT_CHUNK_BYTES - 1] ^= 0x55;
+        tampered[MAX_RESULT_CHUNK_BYTES + 1] ^= 0x55;
         fs::write(&result_path, &tampered).unwrap();
         assert!(indexed_chunk(&directory, &id, &index_sha, length, 0, 128).is_ok());
         assert!(indexed_chunk(
