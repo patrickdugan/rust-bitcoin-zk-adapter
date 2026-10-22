@@ -430,6 +430,7 @@ pub async fn tx_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcErro
 }
 
 pub const MAX_SPEND_INPUTS: usize = 256;
+type SelectedPrevout = ((Txid, u32), Value);
 pub const MAX_PARALLEL_PREVOUT_READS: usize = 4;
 
 /// Decode an independently fetched previous transaction and extract only the
@@ -438,7 +439,7 @@ fn verified_parent_outputs(
     raw_hex: &str,
     expected_txid: Txid,
     vouts: &[u32],
-) -> Result<Vec<((Txid, u32), Value)>, RpcError> {
+) -> Result<Vec<SelectedPrevout>, RpcError> {
     let bytes = hex::decode(raw_hex)
         .map_err(|_| RpcError::new(-32013, "previous transaction is not valid hexadecimal"))?;
     let parent: Transaction = deserialize(&bytes)
