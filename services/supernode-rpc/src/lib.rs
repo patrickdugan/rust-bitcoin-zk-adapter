@@ -17,6 +17,8 @@ use reqwest::{redirect, Client, Url};
 use serde_json::{json, Value};
 use std::{str::FromStr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
+#[cfg(unix)]
+pub mod broker;
 pub mod cache;
 pub mod chain;
 pub mod jobs;

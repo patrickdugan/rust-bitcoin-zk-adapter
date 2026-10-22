@@ -22,6 +22,9 @@ use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
 };
 
+#[cfg(unix)]
+use crate::broker::BrokerClient;
+
 use crate::{
     cache::ArtifactStore,
     chain::ChainTracker,
@@ -339,6 +342,8 @@ pub struct JobManager {
     core: CoreRpc,
     chain: Arc<ChainTracker>,
     workers: WorkerPrograms,
+    #[cfg(unix)]
+    broker: Option<BrokerClient>,
     raito_verifier: Option<RaitoVerifier>,
     raito_fetch_config: Option<PathBuf>,
     memory: Arc<Semaphore>,
@@ -511,6 +516,8 @@ impl JobManager {
             core,
             chain,
             workers,
+            #[cfg(unix)]
+            broker: None,
             raito_verifier,
             raito_fetch_config,
             memory: Arc::new(Semaphore::new(memory_budget_mib as usize)),
@@ -525,10 +532,30 @@ impl JobManager {
         }))
     }
 
+
+    /// Select a separate-UID broker before the manager has any other owners.
+    /// No direct worker binary may remain configured when isolation is on.
+    #[cfg(unix)]
+    pub fn with_broker(mut self: Arc<Self>, broker: BrokerClient) -> Result<Arc<Self>, String> {
+        if self.workers.raito.is_some() || self.workers.shinigami.is_some() {
+            return Err("isolated broker cannot share a manager with direct workers".into());
+        }
+        Arc::get_mut(&mut self)
+            .ok_or("broker must be installed before manager is shared")?
+            .broker = Some(broker);
+        Ok(self)
+    }
+
     pub fn capabilities(&self) -> Value {
         json!({
             "queue_enabled":true,
-            "raito_worker_configured":self.workers.enabled(&JobKind::Raito),
+            "raito_worker_configured":self.raito_worker_configured(),
+            "separate_uid_broker_configured":{
+                #[cfg(unix)]
+                { self.broker.is_some() }
+                #[cfg(not(unix))]
+                { false }
+            },
             "raito_verifier_configured":self.raito_verifier.is_some(),
             "raito_fetch_configured":self.raito_fetch_config.is_some(),
             "typed_raito_receipts_enabled":self.raito_verifier.is_some(),
@@ -552,6 +579,12 @@ impl JobManager {
 
     pub fn raito_worker_configured(&self) -> bool {
         self.workers.enabled(&JobKind::Raito)
+            || {
+                #[cfg(unix)]
+                { self.broker.is_some() }
+                #[cfg(not(unix))]
+                { false }
+            }
     }
 
     pub async fn status(&self, id: &str) -> Result<JobRecord, String> {
@@ -632,7 +665,9 @@ impl JobManager {
             .map(|txid| bitcoin::Txid::from_str(txid).map(|parsed| parsed.to_string()))
             .transpose()
             .map_err(|_| "invalid expected Bitcoin TXID")?;
-        if !self.workers.enabled(&kind) {
+        let configured = self.workers.enabled(&kind)
+            || (kind == JobKind::Raito && self.raito_worker_configured());
+        if !configured {
             return Err("requested proving worker is not configured".into());
         }
         if memory_mib == 0 || memory_mib > self.memory_budget_mib || !is_hash(policy_sha256) {
@@ -1010,6 +1045,61 @@ impl JobManager {
         }))
     }
 
+    /// Never stage broker input inside the gateway's private metadata store.
+    /// Direct execution remains available only for test/dev configurations.
+    async fn execute_worker(
+        &self,
+        record: &JobRecord,
+        data: &[u8],
+        input_path: &Path,
+        output_path: &Path,
+    ) -> Result<(), String> {
+        #[cfg(unix)]
+        if let Some(ref broker) = self.broker {
+            return broker.run(record, data, output_path).await;
+        }
+        let worker = self
+            .workers
+            .executable(&record.kind)
+            .ok_or("configured worker disappeared")?;
+        fs::write(input_path, data).map_err(|err| err.to_string())?;
+        let mut cmd = Command::new(worker);
+        cmd.arg("--input")
+            .arg(input_path)
+            .arg("--output")
+            .arg(output_path)
+            .arg("--network")
+            .arg(&record.network)
+            .arg("--blockhash")
+            .arg(&record.block_hash)
+            .arg("--height")
+            .arg(record.block_height.to_string())
+            .arg("--policy-sha256")
+            .arg(&record.policy_sha256)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        if record.kind == JobKind::Raito {
+            if let Some(ref txid) = record.expected_txid {
+                cmd.arg("--expected-txid").arg(txid);
+            }
+            if let Some(ref config) = self.raito_fetch_config {
+                cmd.env("SUPERNODE_RAITO_FETCH_CONFIG", config);
+            }
+            if let Some(limit) = std::env::var_os("SUPERNODE_REQUIRE_CGROUP_MAX_MIB") {
+                cmd.env("SUPERNODE_REQUIRE_CGROUP_MAX_MIB", limit);
+            }
+        }
+        let status = crate::process::run_supervised(cmd, MAX_WORKER_DURATION).await?;
+        if !status.success() {
+            return Err(format!("approved worker exited with status {status}"));
+        }
+        Ok(())
+    }
+
     async fn run(self: Arc<Self>, id: String, _queue_permit: OwnedSemaphorePermit) {
         let Some(record) = self.records.lock().await.get(&id).cloned() else {
             return;
@@ -1057,51 +1147,7 @@ impl JobManager {
             self.set_status(&id, JobStatus::Running, None, None, None, None)
                 .await;
 
-            let worker = self
-                .workers
-                .executable(&record.kind)
-                .ok_or("configured worker disappeared")?;
-            fs::write(&input_path, data).map_err(|err| err.to_string())?;
-
-            // Only the operator chooses executable paths. No shell is used,
-            // and no RPC field can become part of the executable filename.
-            let mut cmd = Command::new(worker);
-            cmd.arg("--input")
-                .arg(&input_path)
-                .arg("--output")
-                .arg(&output_path)
-                .arg("--network")
-                .arg(&record.network)
-                .arg("--blockhash")
-                .arg(&record.block_hash)
-                .arg("--height")
-                .arg(record.block_height.to_string())
-                .arg("--policy-sha256")
-                .arg(&record.policy_sha256)
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            if record.kind == JobKind::Raito {
-                // TXID and fetch-config come from a canonical job record and
-                // operator-owned gateway configuration, never an RPC command.
-                if let Some(ref txid) = record.expected_txid {
-                    cmd.arg("--expected-txid").arg(txid);
-                }
-                if let Some(ref config) = self.raito_fetch_config {
-                    cmd.env("SUPERNODE_RAITO_FETCH_CONFIG", config);
-                }
-                if let Some(limit) = std::env::var_os("SUPERNODE_REQUIRE_CGROUP_MAX_MIB") {
-                    cmd.env("SUPERNODE_REQUIRE_CGROUP_MAX_MIB", limit);
-                }
-            }
-
-            let status = crate::process::run_supervised(cmd, MAX_WORKER_DURATION).await?;
-            if !status.success() {
-                return Err(format!("approved worker exited with status {status}"));
-            }
+            self.execute_worker(&record, &data, &input_path, &output_path).await?;
             self.check_chain(&record).await?;
             let (digest, size, index) = checked_result_digest(&output_path)?;
             let index_digest = hash_bytes(&index);

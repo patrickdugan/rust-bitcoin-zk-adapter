@@ -7,15 +7,15 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use supernode_worker_broker_protocol::{
     hex_hash, read_header, write_header, RunReply, RunRequest, TRANSFER_CHUNK_BYTES, VERSION,
-    MAX_INPUT_BYTES, MAX_OUTPUT_BYTES,
+    MAX_OUTPUT_BYTES,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
