@@ -11,8 +11,8 @@ use std::{
     time::Duration,
 };
 use supernode_worker_broker_protocol::{
-    read_header, write_header, VerifyReply, VerifyRequest,
-    MAX_VERIFY_PROOF_BYTES, TRANSFER_CHUNK_BYTES, VERSION,
+    read_header, write_header, VerifyReply, VerifyRequest, MAX_VERIFY_PROOF_BYTES,
+    TRANSFER_CHUNK_BYTES, VERSION,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -56,14 +56,13 @@ impl IsolatedRaitoVerifier {
         record: &JobRecord,
         digest: &str,
     ) -> Result<RaitoVerifiedReceipt, String> {
-        let txid = record.expected_txid.as_deref()
+        let txid = record
+            .expected_txid
+            .as_deref()
             .ok_or("expected transaction ID required for isolated Raito verification")?;
         let proof = root.join(format!("{}.output", record.id));
         let info = fs::symlink_metadata(&proof).map_err(|e| e.to_string())?;
-        if !info.file_type().is_file()
-            || info.len() == 0
-            || info.len() > MAX_VERIFY_PROOF_BYTES
-        {
+        if !info.file_type().is_file() || info.len() == 0 || info.len() > MAX_VERIFY_PROOF_BYTES {
             return Err("Raito compressed proof missing or outside 16 MiB bound".into());
         }
         let request = VerifyRequest {
@@ -78,9 +77,13 @@ impl IsolatedRaitoVerifier {
             proof_bytes: info.len(),
         };
         request.validate()?;
-        let mut stream = UnixStream::connect(&self.socket).await.map_err(|e| e.to_string())?;
+        let mut stream = UnixStream::connect(&self.socket)
+            .await
+            .map_err(|e| e.to_string())?;
         if !stream.peer_cred().is_ok_and(|peer| peer.uid() == self.uid) {
-            return Err("verifier socket peer UID differs from operator-approved verifier UID".into());
+            return Err(
+                "verifier socket peer UID differs from operator-approved verifier UID".into(),
+            );
         }
         write_header(&mut stream, &request).await?;
         let file = fs::OpenOptions::new()
@@ -94,8 +97,13 @@ impl IsolatedRaitoVerifier {
         let mut chunk = [0u8; TRANSFER_CHUNK_BYTES];
         while offset < request.proof_bytes {
             let length = (request.proof_bytes - offset).min(chunk.len() as u64) as usize;
-            file.read_exact(&mut chunk[..length]).await.map_err(|e| e.to_string())?;
-            stream.write_all(&chunk[..length]).await.map_err(|e| e.to_string())?;
+            file.read_exact(&mut chunk[..length])
+                .await
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(&chunk[..length])
+                .await
+                .map_err(|e| e.to_string())?;
             sha.input(&chunk[..length]);
             offset += length as u64;
         }
@@ -105,9 +113,8 @@ impl IsolatedRaitoVerifier {
         }
         let reply: VerifyReply = read_header(&mut stream).await?;
         let value = reply.accepted()?;
-        let receipt: RaitoVerifiedReceipt =
-            serde_json::from_value(value.clone())
-                .map_err(|_| "isolated verifier returned malformed typed receipt")?;
+        let receipt: RaitoVerifiedReceipt = serde_json::from_value(value.clone())
+            .map_err(|_| "isolated verifier returned malformed typed receipt")?;
         receipt.validate(record, digest)?;
         Ok(receipt)
     }
@@ -149,7 +156,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "supernode-verifier-peer-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
         let record = record();
@@ -161,7 +171,8 @@ mod tests {
         // Build a deliberately wrong UID: a real verifier must differ from
         // the gateway and the wrong socket peer is rejected before upload.
         let client = IsolatedRaitoVerifier {
-            socket, uid: uid.wrapping_add(1),
+            socket,
+            uid: uid.wrapping_add(1),
         };
         let accept = tokio::spawn(async move {
             let _connection = listener.accept().await.unwrap();
@@ -177,7 +188,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "supernode-verifier-proof-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
         let record = record();
@@ -201,12 +215,20 @@ mod tests {
             let mut all = vec![0; req.proof_bytes as usize];
             peer.read_exact(&mut all).await.unwrap();
             assert_eq!(all, bytes);
-            write_header(&mut peer, &VerifyReply {
-                version: VERSION, receipt: Some(claim), error: None,
-            }).await.unwrap();
+            write_header(
+                &mut peer,
+                &VerifyReply {
+                    version: VERSION,
+                    receipt: Some(claim),
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
         });
         let client = IsolatedRaitoVerifier {
-            socket, uid: nix::unistd::Uid::effective().as_raw()
+            socket,
+            uid: nix::unistd::Uid::effective().as_raw(),
         };
         assert!(client.verify(&root, &record, &digest).await.is_err());
         server.await.unwrap();

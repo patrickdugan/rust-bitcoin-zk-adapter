@@ -919,7 +919,8 @@ impl JobManager {
                 .await?
         };
         #[cfg(not(unix))]
-        let report = self.raito_verifier
+        let report = self
+            .raito_verifier
             .as_ref()
             .ok_or("Raito verifier is not configured")?
             .verify(&self.root, record, digest)

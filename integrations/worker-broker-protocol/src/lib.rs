@@ -177,7 +177,6 @@ mod tests {
     }
 }
 
-
 /// Versioned request to an independently isolated Raito/STARK verifier.
 /// Only compressed proof bytes follow this header; the gateway's job files
 /// and policy storage are inaccessible from the verifier service.
@@ -230,7 +229,9 @@ impl VerifyReply {
         if self.version != VERSION || self.error.is_some() {
             return Err("isolated Raito verifier rejected the proof".into());
         }
-        self.receipt.as_ref().ok_or("Raito verifier omitted the typed receipt".into())
+        self.receipt
+            .as_ref()
+            .ok_or("Raito verifier omitted the typed receipt".into())
     }
 
     pub fn rejected(message: &str) -> Self {
