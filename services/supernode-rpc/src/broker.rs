@@ -21,6 +21,22 @@ use tokio::{
 
 const MAX_BROKER_DURATION: Duration = Duration::from_secs(660);
 
+// Own only files opened with create_new by this transfer. Dropping an
+// interrupted future unlinks its partial output; a failed connection or a
+// create_new collision must never delete an older gateway-owned artifact.
+struct PendingOutput<'a> {
+    path: &'a Path,
+    complete: bool,
+}
+
+impl Drop for PendingOutput<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BrokerClient {
     socket: PathBuf,
@@ -63,13 +79,9 @@ impl BrokerClient {
             input_bytes: input.len() as u64,
         };
         request.validate()?;
-        let result = timeout(MAX_BROKER_DURATION, self.transfer(&request, input, output))
+        timeout(MAX_BROKER_DURATION, self.transfer(&request, input, output))
             .await
-            .map_err(|_| "broker worker or proof transfer exceeded deadline".to_owned())?;
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(output).await;
-        }
-        result
+            .map_err(|_| "broker worker or proof transfer exceeded deadline".to_owned())?
     }
 
     async fn transfer(
@@ -107,6 +119,12 @@ impl BrokerClient {
             .open(output)
             .await
             .map_err(|e| e.to_string())?;
+        // The guard is armed only after exclusive creation succeeded. It
+        // also runs when a timeout or task abort drops this async transfer.
+        let mut pending = PendingOutput {
+            path: output,
+            complete: false,
+        };
         let mut remaining = length;
         let mut engine = sha256::Hash::engine();
         let mut buffer = [0u8; TRANSFER_CHUNK_BYTES];
@@ -129,6 +147,7 @@ impl BrokerClient {
         }
         // The index and proof verification are performed by the gateway
         // after this transfer. The broker's hash is never an attestation.
+        pending.complete = true;
         Ok(())
     }
 }
@@ -234,4 +253,114 @@ mod tests {
         assert!(!root.join("out").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn failed_broker_connection_preserves_preexisting_output() {
+        let root = temp_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("retained.output");
+        std::fs::write(&output, b"preexisting-gateway-owned-output").unwrap();
+        let broker = BrokerClient::new(
+            root.join("nonexistent.sock"),
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .unwrap();
+        assert!(broker
+            .run(&record(), b"input-manifest", &output)
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"preexisting-gateway-owned-output"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_partial_transfer_unlinks_owned_output() {
+        let root = temp_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("worker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let broker = BrokerClient::new(socket, nix::unistd::Uid::effective().as_raw()).unwrap();
+        let payload = vec![0x42; TRANSFER_CHUNK_BYTES * 2];
+        let reply = RunReply {
+            version: VERSION,
+            ok: true,
+            output_bytes: payload.len() as u64,
+            result_sha256: Some(sha256::Hash::hash(&payload).to_string()),
+            error: None,
+        };
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let req: RunRequest = read_header(&mut peer).await.unwrap();
+            let mut input = vec![0u8; req.input_bytes as usize];
+            peer.read_exact(&mut input).await.unwrap();
+            assert_eq!(input, b"input-manifest");
+            write_header(&mut peer, &reply).await.unwrap();
+            peer.write_all(&payload[..16]).await.unwrap();
+            // A malicious broker stalls after opening the gateway output.
+            std::future::pending::<()>().await;
+        });
+        let output = root.join("partial.output");
+        let client_output = output.clone();
+        let client = tokio::spawn(async move {
+            broker
+                .run(&record(), b"input-manifest", &client_output)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if std::fs::metadata(&output).is_ok_and(|m| m.len() >= 16) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("partial proof must reach disk before cancellation");
+        client.abort();
+        let _ = client.await;
+        assert!(!output.exists(), "cancelled transfer leaked a partial proof");
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mismatched_broker_digest_unlinks_owned_output() {
+        let root = temp_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("worker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let broker = BrokerClient::new(socket, nix::unistd::Uid::effective().as_raw()).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let req: RunRequest = read_header(&mut peer).await.unwrap();
+            let mut input = vec![0u8; req.input_bytes as usize];
+            peer.read_exact(&mut input).await.unwrap();
+            let payload = b"synthetic-tampered-proof";
+            write_header(
+                &mut peer,
+                &RunReply {
+                    version: VERSION,
+                    ok: true,
+                    output_bytes: payload.len() as u64,
+                    result_sha256: Some("aa".repeat(32)),
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+            peer.write_all(payload).await.unwrap();
+        });
+        let output = root.join("tampered.output");
+        assert!(broker
+            .run(&record(), b"input-manifest", &output)
+            .await
+            .is_err());
+        server.await.unwrap();
+        assert!(!output.exists(), "digest failure leaked a partial proof");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }
