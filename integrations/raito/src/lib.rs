@@ -2,9 +2,9 @@
 //! Reuses the real Raito verifier and binds it to an expected Bitcoin TXID.
 
 use anyhow::{bail, ensure, Context, Result};
+use bincode::Options;
 use bitcoin::consensus;
 use bitcoin::{BlockHash, MerkleBlock, Transaction, Txid};
-use bincode::Options;
 use bzip2::read::BzDecoder;
 use raito_spv_verify::{verify_proof, CompressedSpvProof, VerifierConfig};
 use rust_bitcoin_zk_adapter::{extract_transaction_candidates, Candidate};
@@ -57,7 +57,10 @@ fn load_bounded_proof(path: &Path) -> Result<CompressedSpvProof> {
     let length = fs::metadata(path)
         .with_context(|| format!("proof path {} could not be inspected", path.display()))?
         .len();
-    ensure!(length <= MAX_COMPRESSED_BYTES, "compressed proof exceeds limit");
+    ensure!(
+        length <= MAX_COMPRESSED_BYTES,
+        "compressed proof exceeds limit"
+    );
 
     let mut decoded = Vec::new();
     let file = File::open(path)?;
@@ -92,13 +95,22 @@ pub async fn verify_raito_proof(
 ) -> Result<RaitoCheckedTransaction> {
     let proof = load_bounded_proof(path)?;
     let found_txid = proof.transaction.compute_txid();
-    ensure!(found_txid == expected_txid, "proof TXID does not match request");
+    ensure!(
+        found_txid == expected_txid,
+        "proof TXID does not match request"
+    );
 
     let tip_height = proof.chain_state.block_height;
-    ensure!(tip_height >= min_proven_height, "proof tip below required height");
+    ensure!(
+        tip_height >= min_proven_height,
+        "proof tip below required height"
+    );
     let block_height = u32::try_from(proof.block_header_proof.leaf_index)
         .context("block height outside u32 range")?;
-    ensure!(block_height <= tip_height, "block height exceeds proven tip");
+    ensure!(
+        block_height <= tip_height,
+        "block height exceeds proven tip"
+    );
 
     let block_hash = proof.block_header.block_hash();
     let transaction = proof.transaction.clone();
