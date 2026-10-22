@@ -14,8 +14,8 @@ use std::{
     time::Duration,
 };
 use supernode_worker_broker_protocol::{
-    hex_hash, read_header, write_header, VerifyReply, VerifyRequest, MAX_VERIFY_PROOF_BYTES,
-    TRANSFER_CHUNK_BYTES, VERSION,
+    hex_hash, read_header, write_header, VerifyReply, VerifyRequest, TRANSFER_CHUNK_BYTES,
+    VERSION,
 };
 use tokio::{
     io::AsyncReadExt,
