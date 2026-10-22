@@ -43,18 +43,27 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_terminates_background_grandchildren() {
-        use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
         let marker = std::env::temp_dir().join(format!(
             "supernode-child-liveness-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let mut command = Command::new("/bin/sh");
-        command.arg("-c")
+        command
+            .arg("-c")
             .arg("while :; do printf x >> \"$1\"; sleep 0.05; done & wait")
             .arg("worker-liveness-test")
             .arg(&marker);
-        assert!(run_supervised(command, Duration::from_millis(450)).await.is_err());
+        assert!(run_supervised(command, Duration::from_millis(450))
+            .await
+            .is_err());
         assert!(marker.exists());
         // Give SIGKILL time to retire the process group before comparing the
         // heartbeat. A surviving grandchild would keep appending bytes.
