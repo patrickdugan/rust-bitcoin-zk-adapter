@@ -1,12 +1,11 @@
-//! Strict, bounded OP_RETURN parsing and syntax-only TradeLayer envelope decoding.
+//! Bounded, protocol-neutral OP_RETURN pushdata extraction.
 //!
-//! This adjunct does not establish Bitcoin consensus, historical TradeLayer
-//! compatibility, or the validity of any state transition.
+//! Invalid scripts fail closed. These application limits are not consensus
+//! rules, and reading pushed bytes cannot establish transaction validity.
 
-use crate::Candidate;
 use std::fmt;
 
-/// Application parser guard, NOT a Bitcoin consensus or relay limit.
+/// Maximum output script bytes accepted by this application's decoder.
 pub const MAX_SCRIPT_BYTES: usize = 100_000;
 pub const MAX_PUSH_OPERATIONS: usize = 1_024;
 
@@ -19,9 +18,6 @@ pub enum DecodeError {
     TruncatedData,
     UnsupportedOpcode(u8),
     DataTooLarge,
-    MissingTransactionType,
-    InvalidTransactionType(u8),
-    NonPrintablePayload,
 }
 
 impl fmt::Display for DecodeError {
@@ -34,25 +30,15 @@ impl fmt::Display for DecodeError {
             Self::TruncatedData => write!(f, "incomplete pushed data"),
             Self::UnsupportedOpcode(op) => write!(f, "opcode 0x{op:02x} is not a data push"),
             Self::DataTooLarge => write!(f, "extracted data exceeds application length limit"),
-            Self::MissingTransactionType => {
-                write!(f, "TradeLayer marker is missing transaction type")
-            }
-            Self::InvalidTransactionType(c) => {
-                write!(f, "invalid base36 transaction type byte 0x{c:02x}")
-            }
-            Self::NonPrintablePayload => {
-                write!(f, "TradeLayer envelope body contains non-printable bytes")
-            }
         }
     }
 }
 impl std::error::Error for DecodeError {}
 
-/// Concatenates all push data following an initial OP_RETURN.
-///
-/// Supports OP_0, direct pushes, OP_PUSHDATA1/2/4. Fails closed on all other
-/// opcodes, truncated fields, excessive scripts or excessive push counts.
-/// Non-minimal pushes are preserved, leaving policy to a later consensus layer.
+/// Concatenate pushed bytes following OP_RETURN (OP_0 and PUSHDATA0/1/2/4).
+/// Fails on non-push opcodes, truncation, or oversized inputs. A Bitcoin
+/// consensus-valid OP_RETURN may contain opcodes rejected by this narrow
+/// application decoder, so failure here only rejects payload extraction.
 pub fn decode_op_return(script: &[u8]) -> Result<Vec<u8>, DecodeError> {
     if script.first() != Some(&0x6a) {
         return Err(DecodeError::NotOpReturn);
@@ -103,38 +89,4 @@ pub fn decode_op_return(script: &[u8]) -> Result<Vec<u8>, DecodeError> {
         cursor = end;
     }
     Ok(data)
-}
-
-/// Pure syntax; every transaction-specific field in body is still opaque.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TradeLayerEnvelope {
-    pub tx_type: u8,
-    pub body: String,
-}
-
-/// Recognizes exactly lowercase ASCII "tl" followed by one base36 type byte.
-/// Returns None for other protocols, Err for malformed tl-prefixed payloads.
-pub fn decode_tradelayer_envelope(data: &[u8]) -> Result<Option<TradeLayerEnvelope>, DecodeError> {
-    if !data.starts_with(b"tl") {
-        return Ok(None);
-    }
-    let type_byte = *data.get(2).ok_or(DecodeError::MissingTransactionType)?;
-    let tx_type = match type_byte {
-        b'0'..=b'9' => type_byte - b'0',
-        b'a'..=b'z' => type_byte - b'a' + 10,
-        _ => return Err(DecodeError::InvalidTransactionType(type_byte)),
-    };
-    let body = &data[3..];
-    if !body.iter().all(|byte| (0x20..=0x7e).contains(byte)) {
-        return Err(DecodeError::NonPrintablePayload);
-    }
-    let body = String::from_utf8(body.to_vec()).map_err(|_| DecodeError::NonPrintablePayload)?;
-    Ok(Some(TradeLayerEnvelope { tx_type, body }))
-}
-
-/// Decode a candidate extracted from a transaction or block.
-/// Does not validate balances, senders, activation heights, or settlements.
-pub fn decode_candidate(candidate: &Candidate) -> Result<Option<TradeLayerEnvelope>, DecodeError> {
-    let data = decode_op_return(&candidate.script)?;
-    decode_tradelayer_envelope(&data)
 }

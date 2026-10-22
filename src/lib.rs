@@ -1,52 +1,59 @@
-//! A small independent adjunct to rust-bitcoin.
+//! Independent Bitcoin application sidecar built atop rust-bitcoin.
 //!
-//! The native verifier below is NOT a zero-knowledge proof system. It supplies
-//! deterministic semantics and public-input boundaries for a future zkVM guest.
-//! The caller is responsible for canonical-chain verification and prevout data.
+//! Deterministic transaction and OP_RETURN utilities live here. Consensus
+//! validation and STARK verification belong to specialized upstream engines.
+//! Raito integration is kept optional to avoid a heavy default dependency tree.
 
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::{Block, Txid};
+use bitcoin::{Block, Transaction, Txid};
 
-pub mod compat;
-pub mod evidence;
 pub mod merkle;
 pub mod op_return;
-pub mod replay;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub txid: Txid,
     pub tx_index: u32,
     pub vout: u32,
-    /// Complete script bytes; OP_RETURN payload parsing is protocol/version specific.
+    /// Original output script, without application-specific interpretation.
     pub script: Vec<u8>,
 }
 
-/// Extracts potential overlay events in canonical transaction/output order.
-/// This step deliberately does not assert that any event belongs to TradeLayer.
+/// Collect OP_RETURN outputs from one Bitcoin transaction, preserving vout
+/// positions. The caller must authenticate the transaction and its position.
+pub fn extract_transaction_candidates(tx: &Transaction, tx_index: u32) -> Vec<Candidate> {
+    let txid = tx.compute_txid();
+    tx.output
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.script_pubkey.is_op_return())
+        .map(|(vout, output)| Candidate {
+            txid,
+            tx_index,
+            vout: vout as u32,
+            script: output.script_pubkey.as_bytes().to_vec(),
+        })
+        .collect()
+}
+
+/// Collect OP_RETURN candidates in block transaction/output order. This
+/// performs NO Bitcoin consensus validation of the supplied block.
 pub fn extract_candidates(block: &Block) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
-    for (tx_index, tx) in block.txdata.iter().enumerate() {
-        for (vout, output) in tx.output.iter().enumerate() {
-            if output.script_pubkey.is_op_return() {
-                candidates.push(Candidate {
-                    txid: tx.compute_txid(),
-                    tx_index: tx_index as u32,
-                    vout: vout as u32,
-                    script: output.script_pubkey.as_bytes().to_vec(),
-                });
-            }
-        }
-    }
-    candidates
+    block
+        .txdata
+        .iter()
+        .enumerate()
+        .flat_map(|(tx_index, tx)| extract_transaction_candidates(tx, tx_index as u32))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicInputs {
     pub chain_id: u32,
     pub block_height: u64,
-    /// Externally established Bitcoin block hash, not verified by this library.
+    /// Claimed block hash supplied by the caller.
     pub block_hash: [u8; 32],
+    /// Arbitrary app-defined prior-state commitment, NOT checked here.
     pub prior_state_root: [u8; 32],
 }
 
@@ -56,10 +63,10 @@ pub struct Receipt {
     pub candidate_count: u64,
 }
 
-/// Deterministic domain-separated commitment to public inputs and extracted
-/// candidate scripts. This is a native receipt, NOT a cryptographic ZK proof.
+/// Deterministic native hash receipt over supplied candidates. This is neither
+/// a STARK proof nor evidence that the candidates belong to a valid chain.
 pub fn commit_candidates(inputs: &PublicInputs, events: &[Candidate]) -> Receipt {
-    let mut bytes = b"RTG-BTC-ZK-ADJUNCT-CANDIDATES-V1".to_vec();
+    let mut bytes = b"RUST-BITCOIN-ZK-SIDECAR-CANDIDATES-V1".to_vec();
     bytes.extend_from_slice(&inputs.chain_id.to_be_bytes());
     bytes.extend_from_slice(&inputs.block_height.to_be_bytes());
     bytes.extend_from_slice(&inputs.block_hash);
@@ -78,8 +85,8 @@ pub fn commit_candidates(inputs: &PublicInputs, events: &[Candidate]) -> Receipt
     }
 }
 
-/// A recomputation check. This authenticates no external Bitcoin data and
-/// provides no ZK soundness or privacy guarantees.
+/// Recompute a native commitment from inputs. A true proof must be checked
+/// through an external verifier such as Raito.
 pub fn verify_native(inputs: &PublicInputs, events: &[Candidate], receipt: &Receipt) -> bool {
     commit_candidates(inputs, events) == *receipt
 }

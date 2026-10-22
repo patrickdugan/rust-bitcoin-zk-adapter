@@ -1,6 +1,6 @@
 use bitcoin::consensus::deserialize;
 use bitcoin::Transaction;
-use rust_bitcoin_zk_adapter::op_return::{decode_op_return, decode_tradelayer_envelope};
+use rust_bitcoin_zk_adapter::op_return::decode_op_return;
 
 fn hex_bytes(source: &str) -> Vec<u8> {
     let hex: String = source
@@ -34,7 +34,6 @@ fn bitcoin_mainnet_real_tx_matches_txid_and_script() {
     assert_eq!(data.len(), 75);
     assert!(data.iter().take(60).all(|byte| *byte == 0));
     assert_eq!(&data[60..], b"learnmeabitcoin");
-    assert_eq!(decode_tradelayer_envelope(&data).unwrap(), None);
 }
 #[test]
 fn bitcoin_core_regtest_segwit_example() {
@@ -51,7 +50,6 @@ fn bitcoin_core_regtest_segwit_example() {
     let data = decode_op_return(tx.output[0].script_pubkey.as_bytes()).unwrap();
     assert_eq!(data.len(), 73);
     assert!(data.starts_with(b"Europe is tired"));
-    assert_eq!(decode_tradelayer_envelope(&data).unwrap(), None);
 }
 #[test]
 fn real_mainnet_scripts_cover_direct_and_pushdata1() {

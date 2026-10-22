@@ -1,6 +1,6 @@
 # Fixture provenance and verification
 
-**Network distinctions matter.** Confirmed Bitcoin mainnet vectors below are NOT purported TradeLayer transactions. Script-only examples establish parsing expectations but cannot authenticate TXIDs or block membership by themselves. The regtest vector is from a public Bitcoin Core example rather than a confirmed mainnet block.
+**Network distinctions matter.** Confirmed Bitcoin mainnet vectors below are generic Bitcoin transaction parsing examples. Script-only examples establish parsing expectations but cannot authenticate TXIDs or block membership by themselves. The regtest vector is from a public Bitcoin Core example rather than a confirmed mainnet block.
 
 | Vector | Provenance | Expected check |
 | --- | --- | --- |
@@ -11,8 +11,3 @@
 
 The mainnet transaction bytes were independently double-SHA256 hashed to the published txid before committing, and the CI suite verifies the txid using `bitcoin::Transaction::compute_txid()`. Raw hex avoids losing byte identity through JSON.
 
-## TradeLayer historical compatibility
-
-[TradeLayer.js src/txIndex.js](https://github.com/patrickdugan/tradelayer.js/blob/main/src/txIndex.js) searches for hex `746c` within the serialized script, and some [encoders](https://github.com/patrickdugan/tradelayer.js/blob/main/src/txEncoder.js) prepend `tl` in addition to the [outer prefix](https://github.com/patrickdugan/tradelayer.js/blob/main/src/types.js). The new parser first decodes Bitcoin push operations, then recognizes a single `tl` marker at data offset zero.
-
-This is an **experimental strict syntax parser**. It does not assert legacy equivalence, deal with type-specific parsing, establish sender/prevouts, authenticate chain inclusion, or assign consensus validity. Compatibility behavior should be enabled by explicit activation versions only after acquiring genuine, verified TradeLayer transaction vectors.

@@ -1,54 +1,27 @@
-use rust_bitcoin_zk_adapter::op_return::{
-    decode_op_return, decode_tradelayer_envelope, DecodeError, TradeLayerEnvelope,
-};
+use rust_bitcoin_zk_adapter::op_return::{decode_op_return, DecodeError};
 
 #[test]
-fn all_push_types_preserve_payload() {
-    let expected = b"tl20;;z;2s";
+fn direct_and_pushdata_encodings_preserve_opaque_bytes() {
+    let content = b"\x00\xffraw-app-data";
     for mut script in [
-        vec![0x6a, expected.len() as u8],
-        vec![0x6a, 0x4c, expected.len() as u8],
-        vec![0x6a, 0x4d, expected.len() as u8, 0],
-        vec![0x6a, 0x4e, expected.len() as u8, 0, 0, 0],
+        vec![0x6a, content.len() as u8],
+        vec![0x6a, 0x4c, content.len() as u8],
+        vec![0x6a, 0x4d, content.len() as u8, 0],
+        vec![0x6a, 0x4e, content.len() as u8, 0, 0, 0],
     ] {
-        script.extend_from_slice(expected);
-        let data = decode_op_return(&script).unwrap();
-        assert_eq!(data, expected);
-        assert_eq!(
-            decode_tradelayer_envelope(&data).unwrap(),
-            Some(TradeLayerEnvelope {
-                tx_type: 2,
-                body: "0;;z;2s".into()
-            })
-        );
+        script.extend_from_slice(content);
+        assert_eq!(decode_op_return(&script).unwrap(), content);
     }
 }
 #[test]
-fn concatenates_separate_pushes() {
-    let script = b"\x6a\x02tl\x0320;\x03z;2";
-    let data = decode_op_return(script).unwrap();
-    assert_eq!(data, b"tl20;z;2");
-    let env = decode_tradelayer_envelope(&data).unwrap().unwrap();
-    assert_eq!(env.tx_type, 2);
-    assert_eq!(env.body, "0;z;2");
+fn concatenates_multiple_pushes_without_protocol_interpretation() {
+    let script = b"\x6a\x02zk\x04proof\x00";
+    assert_eq!(decode_op_return(script).unwrap(), b"zkproof");
 }
 #[test]
-fn marker_must_be_at_payload_start() {
-    let data = decode_op_return(b"\x6a\x06xxxtl2").unwrap();
-    assert_eq!(decode_tradelayer_envelope(&data).unwrap(), None);
-    assert_eq!(decode_tradelayer_envelope(b"omni2").unwrap(), None);
-    assert_eq!(
-        decode_tradelayer_envelope(b"tl"),
-        Err(DecodeError::MissingTransactionType)
-    );
-    assert_eq!(
-        decode_tradelayer_envelope(b"tlAfoo"),
-        Err(DecodeError::InvalidTransactionType(b'A'))
-    );
-    assert_eq!(
-        decode_tradelayer_envelope(b"tl2\x00bad"),
-        Err(DecodeError::NonPrintablePayload)
-    );
+fn preserves_unknown_marker_without_filtering() {
+    let data = decode_op_return(b"\x6a\x06abcd12").unwrap();
+    assert_eq!(data, b"abcd12");
 }
 #[test]
 fn malformed_scripts_fail_closed() {
@@ -57,7 +30,7 @@ fn malformed_scripts_fail_closed() {
         (vec![0x6a, 0x4c], DecodeError::TruncatedLength),
         (vec![0x6a, 0x4d, 0x01], DecodeError::TruncatedLength),
         (vec![0x6a, 0x4e, 0x01, 0, 0], DecodeError::TruncatedLength),
-        (vec![0x6a, 0x03, b't', b'l'], DecodeError::TruncatedData),
+        (vec![0x6a, 0x03, b'a', b'b'], DecodeError::TruncatedData),
         (vec![0x6a, 0x51], DecodeError::UnsupportedOpcode(0x51)),
     ];
     for (script, expected) in cases {
