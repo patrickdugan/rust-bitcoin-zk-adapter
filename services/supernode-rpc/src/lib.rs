@@ -429,7 +429,6 @@ pub async fn tx_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcErro
     }))
 }
 
-
 pub const MAX_SPEND_INPUTS: usize = 256;
 pub const MAX_PARALLEL_PREVOUT_READS: usize = 4;
 
@@ -450,7 +449,9 @@ fn verified_parent_outputs(
     vouts
         .iter()
         .map(|vout| {
-            let output = parent.output.get(*vout as usize)
+            let output = parent
+                .output
+                .get(*vout as usize)
                 .ok_or_else(|| RpcError::new(-32013, "previous output index out of range"))?;
             Ok((
                 (expected_txid, *vout),
@@ -469,20 +470,29 @@ fn verified_parent_outputs(
 /// about Shinigami/Cairo script execution or a separate UTXO validity proof.
 pub async fn spend_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcError> {
     let included = tx_context(core, params).await?;
-    let raw_hex = included.get("raw_transaction_hex").and_then(Value::as_str)
+    let raw_hex = included
+        .get("raw_transaction_hex")
+        .and_then(Value::as_str)
         .ok_or_else(|| RpcError::new(-32013, "transaction context lacks raw hex"))?;
     let tx: Transaction = deserialize(
-        &hex::decode(raw_hex).map_err(|_| RpcError::new(-32013, "invalid raw transaction hex"))?
-    ).map_err(|_| RpcError::new(-32013, "cannot decode spend transaction"))?;
+        &hex::decode(raw_hex).map_err(|_| RpcError::new(-32013, "invalid raw transaction hex"))?,
+    )
+    .map_err(|_| RpcError::new(-32013, "cannot decode spend transaction"))?;
     if tx.input.is_empty() || tx.input.len() > MAX_SPEND_INPUTS {
-        return Err(RpcError::new(-32602, "transaction input count outside bounded spend context limit"));
+        return Err(RpcError::new(
+            -32602,
+            "transaction input count outside bounded spend context limit",
+        ));
     }
 
     let mut needed = std::collections::BTreeMap::<Txid, Vec<u32>>::new();
     for input in &tx.input {
         let prev = input.previous_output;
         if prev.is_null() {
-            return Err(RpcError::new(-32602, "coinbase has no standard prevout spend context"));
+            return Err(RpcError::new(
+                -32602,
+                "coinbase has no standard prevout spend context",
+            ));
         }
         let vouts = needed.entry(prev.txid).or_default();
         if !vouts.contains(&prev.vout) {
@@ -500,43 +510,56 @@ pub async fn spend_context(core: &CoreRpc, params: &Value) -> Result<Value, RpcE
             let response = client
                 .call("getrawtransaction", json!([parent_txid.to_string(), false]))
                 .await?;
-            let raw = response.as_str()
+            let raw = response
+                .as_str()
                 .ok_or_else(|| RpcError::new(-32012, "Bitcoin Core parent transaction missing"))?;
             verified_parent_outputs(raw, parent_txid, &vouts)
         });
         if tasks.len() >= MAX_PARALLEL_PREVOUT_READS {
-            let values = tasks.join_next().await
+            let values = tasks
+                .join_next()
+                .await
                 .ok_or_else(|| RpcError::new(-32012, "missing prevout lookup result"))?
                 .map_err(|_| RpcError::new(-32012, "prevout lookup worker failed"))??;
             previous.extend(values);
         }
     }
     while let Some(joined) = tasks.join_next().await {
-        let values = joined
-            .map_err(|_| RpcError::new(-32012, "prevout lookup worker failed"))??;
+        let values =
+            joined.map_err(|_| RpcError::new(-32012, "prevout lookup worker failed"))??;
         previous.extend(values);
     }
 
-    let outputs = tx.input.iter().enumerate().map(|(index, input)| {
-        let prev = input.previous_output;
-        let data = previous.get(&(prev.txid, prev.vout))
-            .ok_or_else(|| RpcError::new(-32013, "prevout was not found"))?;
-        Ok(json!({
-            "input_index":index,
-            "previous_txid":prev.txid.to_string(),
-            "previous_vout":prev.vout,
-            "value_sats":data["value_sats"],
-            "script_pubkey_hex":data["script_pubkey_hex"]
-        }))
-    }).collect::<Result<Vec<_>,RpcError>>()?;
+    let outputs = tx
+        .input
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let prev = input.previous_output;
+            let data = previous
+                .get(&(prev.txid, prev.vout))
+                .ok_or_else(|| RpcError::new(-32013, "prevout was not found"))?;
+            Ok(json!({
+                "input_index":index,
+                "previous_txid":prev.txid.to_string(),
+                "previous_vout":prev.vout,
+                "value_sats":data["value_sats"],
+                "script_pubkey_hex":data["script_pubkey_hex"]
+            }))
+        })
+        .collect::<Result<Vec<_>, RpcError>>()?;
 
     // Recheck the pinned active-chain block after potentially lengthy
     // prevout retrieval. The consumer still owns its finality policy.
     let height = included["block_height"]
-        .as_u64().ok_or_else(|| RpcError::new(-32013, "missing block height"))?;
+        .as_u64()
+        .ok_or_else(|| RpcError::new(-32013, "missing block height"))?;
     let active = core.call("getblockhash", json!([height])).await?;
     if active.as_str() != included["blockhash"].as_str() {
-        return Err(RpcError::new(-32014, "active chain changed while gathering spend context"));
+        return Err(RpcError::new(
+            -32014,
+            "active chain changed while gathering spend context",
+        ));
     }
 
     Ok(json!({
@@ -676,7 +699,6 @@ mod tests {
         assert_eq!(answer["result"]["network"], "regtest");
     }
 
-
     #[test]
     fn exact_parent_amounts_and_scripts_are_extracted_by_vout() {
         let genesis = genesis_block(Network::Bitcoin);
@@ -685,7 +707,10 @@ mod tests {
         let outputs = verified_parent_outputs(&raw, parent.compute_txid(), &[0]).unwrap();
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].1["value_sats"], 5_000_000_000u64);
-        assert!(outputs[0].1["script_pubkey_hex"].as_str().unwrap().ends_with("ac"));
+        assert!(outputs[0].1["script_pubkey_hex"]
+            .as_str()
+            .unwrap()
+            .ends_with("ac"));
         let rejected = verified_parent_outputs(&raw, Txid::from_byte_array([0; 32]), &[0]);
         assert!(rejected.is_err());
         assert!(verified_parent_outputs(&raw, parent.compute_txid(), &[1]).is_err());
