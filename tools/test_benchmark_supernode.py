@@ -139,7 +139,7 @@ class CgroupReportingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(
                 Path(tmp), current="9" * 5000, peak=str(1 << 64),
-                swap="0", io_stat="8:0 rbytes=" + "9" * 5000 + " wbytes=0\\n")
+                swap="0", io_stat="8:0 rbytes=" + "9" * 5000 + " wbytes=0\n")
             snap = snapshot_cgroup(root)
             for field in ("memory_current_bytes", "memory_peak_bytes",
                           "io_read_bytes"):
