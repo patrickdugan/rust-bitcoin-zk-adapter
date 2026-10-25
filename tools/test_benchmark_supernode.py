@@ -147,6 +147,66 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertIn("decreased on 8:0", delta["errors"]["io_read_delta_bytes"])
             self.assertEqual(delta["io_write_delta_bytes"], 14)
 
+    def test_role_scope_replaced_before_first_sample_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            producer = self.fixture(base / "producer", current=11,
+                                    io_stat="8:0 rbytes=5 wbytes=7\n")
+            verifier = self.fixture(base / "verifier", current=31,
+                                    io_stat="8:0 rbytes=9 wbytes=13\n")
+            selected = select_cgroups(None, producer, verifier)
+            original = selected.expected_identities["producer"]
+            producer.rename(base / "retired-producer")
+            self.fixture(producer, current=99,
+                         io_stat="8:0 rbytes=500 wbytes=700\n")
+            self.assertNotEqual(original, {
+                "device": producer.stat().st_dev, "inode": producer.stat().st_ino})
+            job = self.job(selected)
+            for sample in (job["cgroups_before"], job["cgroups_after"]):
+                replaced = sample["producer"]
+                self.assertIsNone(replaced["cgroup_fs_identity"])
+                self.assertIsNone(replaced["memory_current_bytes"])
+                self.assertIsNone(replaced["io_read_bytes"])
+                self.assertIn("changed since selection",
+                              replaced["errors"]["memory_current_bytes"])
+                self.assertEqual(sample["verifier"]["memory_current_bytes"], 31)
+            delta = job["cgroups_io_delta"]["producer"]
+            self.assertIsNone(delta["io_read_delta_bytes"])
+            self.assertIsNone(delta["io_write_delta_bytes"])
+            self.assertEqual(job["cgroups_io_delta"]["verifier"]["io_read_delta_bytes"], 0)
+
+    def test_roles_swapped_after_selection_are_both_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            producer = self.fixture(base / "producer", current=10)
+            verifier = self.fixture(base / "verifier", current=20)
+            selected = select_cgroups(None, producer, verifier)
+            producer.rename(base / "spare")
+            verifier.rename(producer)
+            (base / "spare").rename(verifier)
+            job = self.job(selected)
+            for role in ("producer", "verifier"):
+                sample = job["cgroups_before"][role]
+                self.assertIsNone(sample["memory_current_bytes"])
+                self.assertIn("changed since selection",
+                              sample["errors"]["memory_current_bytes"])
+                self.assertIsNone(job["cgroups_io_delta"][role]["io_read_delta_bytes"])
+
+    def test_legacy_scope_replaced_after_selection_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            worker = self.fixture(base / "worker", current=5)
+            selected = select_cgroups(worker, None, None)
+            worker.rename(base / "old-worker")
+            self.fixture(worker, current=700)
+            job = self.job(selected)
+            self.assertIn("cgroup_before", job)
+            self.assertIn("cgroup_after", job)
+            self.assertIsNone(job["cgroup_before"]["memory_current_bytes"])
+            self.assertIsNone(job["cgroup_io_delta"]["io_read_delta_bytes"])
+            self.assertIn("changed since selection",
+                          job["cgroup_after"]["errors"]["memory_peak_bytes"])
+
     def test_recreated_producer_cgroup_invalidates_only_its_interval(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
