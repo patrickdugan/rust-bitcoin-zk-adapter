@@ -22,6 +22,24 @@ from urllib.request import Request, build_opener, ProxyHandler
 RESPONSE_CAP = 1024 * 1024
 DONE = {"verified_raito", "completed_unverified", "output_evicted", "failed", "interrupted"}
 PENDING = {"queued", "running", "verifying_raito"}
+MAX_CGROUP_COUNTER = (1 << 64) - 1
+
+
+class UniqueCgroupPath(argparse.Action):
+    """Reject repeat flags; argparse otherwise silently keeps the last path."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest) is not None:
+            parser.error(f"{option_string} supplied more than once")
+        setattr(namespace, self.dest, values)
+
+
+def parse_cgroup_counter(value: str | None) -> int | None:
+    """Accept only bounded unsigned kernel counters, not arbitrary decimals."""
+    if value is None or re.fullmatch(r"[0-9]{1,20}", value) is None:
+        return None
+    number = int(value)
+    return number if number <= MAX_CGROUP_COUNTER else None
 
 
 def require_hash(value: str) -> str:
@@ -108,7 +126,9 @@ def select_cgroups(worker: Path | None, producer: Path | None,
         prod, ver = canonical["producer"], canonical["verifier"]
         if prod == ver or prod in ver.parents or ver in prod.parents:
             raise ValueError("producer and verifier cgroups must be distinct, non-overlapping paths")
-    return selected
+    # Keep reading the validated canonical path if a supplied symlink is
+    # later retargeted. Neither a resolved path nor its counters proves UID.
+    return canonical
 
 
 def snapshot_cgroup(root: Path | None) -> dict:
@@ -133,10 +153,11 @@ def snapshot_cgroup(root: Path | None) -> dict:
         except (OSError, UnicodeError) as exc:
             errors[key] = f"{name} unavailable: {type(exc).__name__}"
             continue
-        if not raw or not raw.isdecimal():
-            errors[key] = f"{name} malformed: expected non-negative integer"
+        parsed = parse_cgroup_counter(raw)
+        if parsed is None:
+            errors[key] = f"{name} malformed: expected unsigned 64-bit counter"
         else:
-            result[key] = int(raw)
+            result[key] = parsed
 
     try:
         rows = [line.split() for line in (root / "io.stat")
@@ -172,10 +193,11 @@ def snapshot_cgroup(root: Path | None) -> dict:
                     values[key] = value
                 for field, metric in fields.items():
                     raw = values.get(field)
-                    if malformed or raw is None or not raw.isdecimal():
+                    parsed = parse_cgroup_counter(raw)
+                    if malformed or parsed is None:
                         errors[metric] = f"io.stat malformed: {field} missing or invalid on {device}"
                     else:
-                        totals[field] += int(raw)
+                        totals[field] += parsed
             for field, metric in fields.items():
                 if metric not in errors:
                     result[metric] = totals[field]
@@ -285,10 +307,10 @@ def main() -> None:
     p.add_argument("--rpc-samples", type=int, default=5)
     p.add_argument("--runs", type=int, default=1)
     p.add_argument("--timeout-seconds", type=float, default=1300)
-    p.add_argument("--worker-cgroup", type=Path,
+    p.add_argument("--worker-cgroup", type=Path, action=UniqueCgroupPath,
                    help="legacy single cgroup for combined workers (exclusive with role-specific options)")
-    p.add_argument("--producer-cgroup", type=Path)
-    p.add_argument("--verifier-cgroup", type=Path)
+    p.add_argument("--producer-cgroup", type=Path, action=UniqueCgroupPath)
+    p.add_argument("--verifier-cgroup", type=Path, action=UniqueCgroupPath)
     p.add_argument("--output", type=Path)
     args = p.parse_args()
     txid, blockhash, policy = (
