@@ -14,8 +14,8 @@ kept in three separate categories, and none of them substitutes for another:
 | All relevant workflows pass on the exact head | synthetic CI | **PASS** | 11/11 runs on `39e1140` (environment.md) |
 | One genuine compressed Raito SPV proof yields a typed receipt under the pinned verifier | authentic | **BLOCKED** | No mainnet Core, bridge NXDOMAIN, no proof artifact (positive.json) |
 | Negative cases checked end to end on a genuine proof | authentic | **BLOCKED** | Needs the retained genuine proof |
-| Compromised worker cannot edit gateway job records or verifier policy | OS isolation | see negative-matrix.md | |
-| SIGKILL of gateway/worker/verifier leaves no children or unbounded artifacts | OS isolation | see negative-matrix.md | |
+| Compromised worker cannot edit gateway job records or verifier policy | OS isolation | **PASS** (synthetic workers) | zk VPS, negative-matrix.md |
+| SIGKILL of gateway/worker/verifier leaves no children or unbounded artifacts | OS isolation | **PASS** (synthetic jobs) | zk VPS, negative-matrix.md |
 | Peak RAM, I/O, latency, cold/warm Core overhead recorded with the benchmark harness | authentic | **BLOCKED** | Needs a genuine proof run on the operator host |
 
 ## Recommendation

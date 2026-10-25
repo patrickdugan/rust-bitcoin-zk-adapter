@@ -8,7 +8,7 @@
   "txid": null,
   "block_hash": null,
   "block_height": null,
-  "policy_sha256": null,
+  "policy_sha256": "18b4cf2dc3686f38978f4543a8bd42616b27caa6a6e0c87ce3c850b337a6664c",
   "compressed_proof_sha256": null,
   "core_active_chain_checked": false,
   "blockers": [
