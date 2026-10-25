@@ -145,6 +145,65 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertIn("decreased on 8:0", delta["errors"]["io_read_delta_bytes"])
             self.assertEqual(delta["io_write_delta_bytes"], 14)
 
+    def test_recreated_producer_cgroup_invalidates_only_its_interval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            producer = self.fixture(base / "producer", io_stat="8:0 rbytes=5 wbytes=7\n")
+            verifier = self.fixture(base / "verifier", io_stat="8:0 rbytes=10 wbytes=20\n")
+
+            def rotate_producer():
+                producer.rename(base / "old-producer")
+                self.fixture(producer, io_stat="8:0 rbytes=15 wbytes=17\n")
+                (verifier / "io.stat").write_text(
+                    "8:0 rbytes=13 wbytes=29\n", encoding="ascii")
+
+            job = self.job(select_cgroups(None, producer, verifier), rotate_producer)
+            before = job["cgroups_before"]
+            after = job["cgroups_after"]
+            self.assertNotEqual(before["producer"]["cgroup_fs_identity"],
+                                after["producer"]["cgroup_fs_identity"])
+            self.assertEqual(before["producer"]["io_devices"]["8:0"]["rbytes"], 5)
+            self.assertEqual(after["producer"]["io_devices"]["8:0"]["rbytes"], 15)
+            producer_delta = job["cgroups_io_delta"]["producer"]
+            self.assertIsNone(producer_delta["io_read_delta_bytes"])
+            self.assertIsNone(producer_delta["io_write_delta_bytes"])
+            self.assertIn("filesystem identity changed",
+                          producer_delta["errors"]["io_read_delta_bytes"])
+            verifier_delta = job["cgroups_io_delta"]["verifier"]
+            self.assertEqual(verifier_delta["io_read_delta_bytes"], 3)
+            self.assertEqual(verifier_delta["io_write_delta_bytes"], 9)
+
+    def test_torn_snapshot_refuses_values_when_directory_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), io_stat="8:0 rbytes=5 wbytes=9\n")
+            first = {"device": 1, "inode": 10}
+            second = {"device": 1, "inode": 11}
+            with patch("tools.benchmark_supernode.cgroup_fs_identity",
+                       side_effect=[first, second]):
+                snap = snapshot_cgroup(root)
+            self.assertIsNone(snap["cgroup_fs_identity"])
+            self.assertIsNone(snap["io_devices"])
+            for key in ("memory_current_bytes", "memory_peak_bytes",
+                        "swap_peak_bytes", "io_read_bytes", "io_write_bytes"):
+                self.assertIsNone(snap[key])
+                self.assertIn("changed during snapshot", snap["errors"][key])
+
+    def test_legacy_scope_recreation_invalidates_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            worker = self.fixture(base / "worker", io_stat="8:0 rbytes=9 wbytes=6\n")
+
+            def restart_scope():
+                worker.rename(base / "retired-worker")
+                self.fixture(worker, io_stat="8:0 rbytes=11 wbytes=10\n")
+
+            job = self.job(select_cgroups(worker, None, None), restart_scope)
+            self.assertIn("cgroup_before", job)
+            self.assertIn("cgroup_after", job)
+            self.assertIsNone(job["cgroup_io_delta"]["io_read_delta_bytes"])
+            self.assertIn("filesystem identity changed",
+                          job["cgroup_io_delta"]["errors"]["io_write_delta_bytes"])
+
     def test_io_delta_refuses_device_set_churn(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(Path(tmp), io_stat="8:0 rbytes=5 wbytes=6\n")
