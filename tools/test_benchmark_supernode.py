@@ -225,11 +225,13 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertNotEqual(before["producer"]["cgroup_fs_identity"],
                                 after["producer"]["cgroup_fs_identity"])
             self.assertEqual(before["producer"]["io_devices"]["8:0"]["rbytes"], 5)
-            self.assertEqual(after["producer"]["io_devices"]["8:0"]["rbytes"], 15)
+            self.assertIsNone(after["producer"]["io_devices"])
+            self.assertIn("changed since selection",
+                          after["producer"]["errors"]["io_read_bytes"])
             producer_delta = job["cgroups_io_delta"]["producer"]
             self.assertIsNone(producer_delta["io_read_delta_bytes"])
             self.assertIsNone(producer_delta["io_write_delta_bytes"])
-            self.assertIn("filesystem identity changed",
+            self.assertIn("filesystem identity unavailable",
                           producer_delta["errors"]["io_read_delta_bytes"])
             verifier_delta = job["cgroups_io_delta"]["verifier"]
             self.assertEqual(verifier_delta["io_read_delta_bytes"], 3)
@@ -322,7 +324,7 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertIn("cgroup_before", job)
             self.assertIn("cgroup_after", job)
             self.assertIsNone(job["cgroup_io_delta"]["io_read_delta_bytes"])
-            self.assertIn("filesystem identity changed",
+            self.assertIn("filesystem identity unavailable",
                           job["cgroup_io_delta"]["errors"]["io_write_delta_bytes"])
 
     def test_io_delta_refuses_device_set_churn(self):
