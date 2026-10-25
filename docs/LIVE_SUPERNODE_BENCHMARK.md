@@ -66,8 +66,24 @@ a description under the scope's `errors` map. A genuine counter value of
 zero remains numeric zero. `io.stat` sums per-device `rbytes` and `wbytes`
 only when the respective fields are present and valid on every listed device.
 An absent `memory.swap.peak` on some kernels is reported as unavailable.
-Snapshots are taken before submission and after completion, with cumulative
-I/O totals requiring subtraction to obtain an interval delta.
+Snapshots are taken before submission and after completion. Each snapshot
+also includes `io_devices`, which exposes the parsed per-device `rbytes`
+and `wbytes` counters for an auditable cumulative total.
+
+For the **legacy single scope**, each job additionally has
+`cgroup_io_delta.io_read_delta_bytes` and
+`cgroup_io_delta.io_write_delta_bytes`. In paired mode, the matching
+per-role fields live at `cgroups_io_delta.producer` and
+`cgroups_io_delta.verifier`. They subtract counters for individual devices
+between the before/after samples, retaining real zero deltas. A missing or
+malformed sample, disappearing/new device, individual counter decrease
+(reset/recreation), or arithmetic overflow yields `null` and an explanatory
+`errors` entry. These are **I/O counters over the observation interval**,
+not per-process accounting. The cgroup may contain other processes, and
+kernel sampling cannot prove the producer/verifier identities or job ownership.
+The original `cgroup_before`/`cgroup_after` and `cgroups_before`/
+`cgroups_after` fields remain available for existing readers; unconfigured
+legacy runs continue to return empty snapshots without an interval delta.
 
 **Operator prerequisite:** verify role-to-cgroup ownership through systemd
 unit identity and actual process membership (such as `ControlGroup`,
