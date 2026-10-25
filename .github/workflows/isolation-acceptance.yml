@@ -25,6 +25,8 @@ jobs:
       # The runner context is unavailable in job-level env.
       - run: echo "EV=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Offline lifecycle evidence fixtures
+        run: python3 -m unittest discover -s tools/isolation-acceptance -p test_lifecycle.py -v
       - name: Build gateway and brokers
         run: |
           for m in services/supernode-rpc services/proof-worker-broker services/raito-verifier-broker; do
