@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tools.benchmark_supernode import (
     cgroup_io_delta, main, loopback_url, percentiles, require_hash, run_job,
@@ -81,6 +81,26 @@ class CgroupReportingTest(unittest.TestCase):
         control = MutatingControl(on_submit) if on_submit else FakeControl()
         return run_job(FakeRead(), control, "fixture-artifact",
                        "aa" * 32, "bb" * 32, 1, 1, cgroups)
+
+    def assert_rejected_before_submit(self, cgroups, role):
+        # The mock ensures a stale selected scope cannot admit expensive
+        # proving, even when the chosen path still contains valid counters.
+        control = Mock()
+        with self.assertRaisesRegex(
+                RuntimeError, role + " cgroup changed or became unavailable"):
+            run_job(FakeRead(), control, "fixture-artifact",
+                    "aa" * 32, "bb" * 32, 1, 1, cgroups)
+        control.call.assert_not_called()
+
+    def test_missing_optional_counter_does_not_block_a_valid_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp) / "worker", io_stat=None)
+            job = self.job(select_cgroups(root, None, None))
+            self.assertEqual(job["status"], "completed_unverified")
+            self.assertIsNone(job["cgroup_before"]["io_read_bytes"])
+            self.assertIn("unavailable",
+                          job["cgroup_before"]["errors"]["io_read_bytes"])
+            self.assertIsNone(job["cgroup_io_delta"]["io_write_delta_bytes"])
 
     def test_separate_roles_and_two_device_totals(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,19 +181,17 @@ class CgroupReportingTest(unittest.TestCase):
                          io_stat="8:0 rbytes=500 wbytes=700\n")
             self.assertNotEqual(original, {
                 "device": producer.stat().st_dev, "inode": producer.stat().st_ino})
-            job = self.job(selected)
-            for sample in (job["cgroups_before"], job["cgroups_after"]):
-                replaced = sample["producer"]
-                self.assertIsNone(replaced["cgroup_fs_identity"])
-                self.assertIsNone(replaced["memory_current_bytes"])
-                self.assertIsNone(replaced["io_read_bytes"])
-                self.assertIn("changed since selection",
-                              replaced["errors"]["memory_current_bytes"])
-                self.assertEqual(sample["verifier"]["memory_current_bytes"], 31)
-            delta = job["cgroups_io_delta"]["producer"]
-            self.assertIsNone(delta["io_read_delta_bytes"])
-            self.assertIsNone(delta["io_write_delta_bytes"])
-            self.assertEqual(job["cgroups_io_delta"]["verifier"]["io_read_delta_bytes"], 0)
+            self.assert_rejected_before_submit(selected, "producer")
+            replaced = snapshot_cgroup(producer,
+                                       selected.expected_identities["producer"])
+            self.assertIsNone(replaced["cgroup_fs_identity"])
+            self.assertIsNone(replaced["memory_current_bytes"])
+            self.assertIsNone(replaced["io_read_bytes"])
+            self.assertIn("changed since selection",
+                          replaced["errors"]["memory_current_bytes"])
+            valid = snapshot_cgroup(verifier,
+                                    selected.expected_identities["verifier"])
+            self.assertEqual(valid["memory_current_bytes"], 31)
 
     def test_roles_swapped_after_selection_are_both_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -184,13 +202,13 @@ class CgroupReportingTest(unittest.TestCase):
             producer.rename(base / "spare")
             verifier.rename(producer)
             (base / "spare").rename(verifier)
-            job = self.job(selected)
+            self.assert_rejected_before_submit(selected, "producer")
             for role in ("producer", "verifier"):
-                sample = job["cgroups_before"][role]
+                sample = snapshot_cgroup(selected[role],
+                                         selected.expected_identities[role])
                 self.assertIsNone(sample["memory_current_bytes"])
                 self.assertIn("changed since selection",
                               sample["errors"]["memory_current_bytes"])
-                self.assertIsNone(job["cgroups_io_delta"][role]["io_read_delta_bytes"])
 
     def test_legacy_scope_replaced_after_selection_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,13 +217,11 @@ class CgroupReportingTest(unittest.TestCase):
             selected = select_cgroups(worker, None, None)
             worker.rename(base / "old-worker")
             self.fixture(worker, current=700)
-            job = self.job(selected)
-            self.assertIn("cgroup_before", job)
-            self.assertIn("cgroup_after", job)
-            self.assertIsNone(job["cgroup_before"]["memory_current_bytes"])
-            self.assertIsNone(job["cgroup_io_delta"]["io_read_delta_bytes"])
+            self.assert_rejected_before_submit(selected, "worker")
+            snap = snapshot_cgroup(worker, selected.expected_identities["worker"])
+            self.assertIsNone(snap["memory_current_bytes"])
             self.assertIn("changed since selection",
-                          job["cgroup_after"]["errors"]["memory_peak_bytes"])
+                          snap["errors"]["memory_peak_bytes"])
 
     def test_recreated_producer_cgroup_invalidates_only_its_interval(self):
         with tempfile.TemporaryDirectory() as tmp:
