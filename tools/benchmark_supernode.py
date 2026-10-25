@@ -386,6 +386,26 @@ def cgroup_io_delta(before: dict, after: dict) -> dict:
     return result
 
 
+
+def require_selected_scopes_unchanged(cgroups: dict[str, Path],
+                                      before: dict[str, dict]) -> None:
+    """Refuse expensive proof submission after a selected scope is replaced.
+
+    Missing individual metrics stay explicitly unavailable in the report;
+    an invalid scope identity makes the operator's resource-label selection
+    ambiguous and must be resolved before admitting the job.
+    """
+    expected = getattr(cgroups, "expected_identities", {})
+    for role in cgroups:
+        selected_identity = expected.get(role)
+        if (selected_identity is not None
+                and before[role].get("cgroup_fs_identity") != selected_identity):
+            raise RuntimeError(
+                f"{role} cgroup changed or became unavailable since selection; "
+                "refusing proof submission"
+            )
+
+
 def proof_retrieve(gateway: RPC, job_id: str, expected_sha: str) -> dict:
     digest = hashlib.sha256()
     total = 0
@@ -437,6 +457,7 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
         role: snapshot_cgroup(path, expected.get(role))
         for role, path in cgroups.items()
     }
+    require_selected_scopes_unchanged(cgroups, before)
     started = time.monotonic()
     response = gateway_control.call(
         "zk.proof.submit", ["raito", artifact_id, memory_mib, policy, txid])
