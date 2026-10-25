@@ -4,8 +4,9 @@ use super::{
     is_sha256, read_bounded_regular, validate_url, FetchConfig, FetchRequest, WorkerArgs,
     MAX_COMPRESSED_PROOF_BYTES, MAX_CONFIG_BYTES, MAX_REQUEST_BYTES, SCHEMA,
 };
-use bitcoin::{BlockHash, Txid};
+
 use bitcoin::hashes::{sha256, Hash};
+use bitcoin::{BlockHash, Txid};
 use serde::Deserialize;
 use std::{fs, path::PathBuf, str::FromStr};
 
@@ -104,8 +105,8 @@ pub(super) fn select_offline(
             {
                 return Err("declared artifact bytes or SHA-256 mismatch".into());
             }
-            let after = fs::symlink_metadata(&local.path)
-                .map_err(|_| "declared artifact disappeared")?;
+            let after =
+                fs::symlink_metadata(&local.path).map_err(|_| "declared artifact disappeared")?;
             if !after.file_type().is_file()
                 || after.len() != local.bytes
                 || before.len() != after.len()
@@ -157,7 +158,10 @@ pub(super) fn select_offline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{env, fs, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn job() -> WorkerArgs {
         WorkerArgs {
@@ -171,11 +175,15 @@ mod tests {
     fn request() -> Vec<u8> {
         serde_json::json!({"schema":SCHEMA,"network":"main",
             "txid":"12".repeat(32),"block_hash":"ab".repeat(32),
-            "block_height":300}).to_string().into_bytes()
+            "block_height":300})
+        .to_string()
+        .into_bytes()
     }
     fn select(local: Option<serde_json::Value>, bridge: Option<serde_json::Value>) -> Vec<u8> {
         serde_json::json!({"schema":SELECTION_SCHEMA,
-            "local_artifact":local,"bridge":bridge}).to_string().into_bytes()
+            "local_artifact":local,"bridge":bridge})
+        .to_string()
+        .into_bytes()
     }
     fn bridge() -> serde_json::Value {
         serde_json::json!({"raito_bridge_url":"https://api.raito.wtf",
@@ -186,11 +194,19 @@ mod tests {
             "client_sha256":"cd".repeat(32),
             "bitcoin_rpc_url":"http://127.0.0.1:8332",
             "bitcoin_rpc_cookie_file":"/synthetic/not-read.cookie",
-            "raito_bridge_url":"https://api.raito.wtf"}).to_string().into_bytes()
+            "raito_bridge_url":"https://api.raito.wtf"})
+        .to_string()
+        .into_bytes()
     }
     fn temp_dir() -> PathBuf {
-        let unique=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir=env::temp_dir().join(format!("raito-source-offline-{}-{unique}",std::process::id()));
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!(
+            "raito-source-offline-{}-{unique}",
+            std::process::id()
+        ));
         fs::create_dir(&dir).unwrap();
         dir
     }
@@ -200,73 +216,142 @@ mod tests {
     }
     #[test]
     fn explicit_source_required_and_ambiguity_fails_closed() {
-        assert!(select_offline(&select(None,None),&request(),&job(),None).is_err());
-        assert!(select_offline(&select(Some(serde_json::json!({})),Some(bridge())),
-            &request(),&job(),Some(&config())).unwrap_err().contains("ambiguous"));
-        assert!(select_offline(b"{}",&request(),&job(),None).is_err());
-        assert!(select_offline(b"{",&request(),&job(),None).is_err());
-        assert!(select_offline(&vec![b'x';8193],&request(),&job(),None).is_err());
+        assert!(select_offline(&select(None, None), &request(), &job(), None).is_err());
+        assert!(select_offline(
+            &select(Some(serde_json::json!({})), Some(bridge())),
+            &request(),
+            &job(),
+            Some(&config())
+        )
+        .unwrap_err()
+        .contains("ambiguous"));
+        assert!(select_offline(b"{}", &request(), &job(), None).is_err());
+        assert!(select_offline(b"{", &request(), &job(), None).is_err());
+        assert!(select_offline(&vec![b'x'; 8193], &request(), &job(), None).is_err());
     }
     #[test]
     fn bridge_metadata_never_means_availability_or_verification() {
-        let ok=select_offline(&select(None,Some(bridge())),&request(),&job(),Some(&config())).unwrap();
-        assert_eq!(ok.acceptance,"UNVERIFIED");
-        assert_eq!(ok.availability,"NOT_CHECKED");
-        assert_eq!(ok.bytes,None);
-        assert!(select_offline(&select(None,Some(bridge())),&request(),&job(),None).is_err());
-        let mut wrong=bridge();
-        wrong["client_sha256"]=serde_json::json!("ef".repeat(32));
-        assert!(select_offline(&select(None,Some(wrong)),&request(),&job(),Some(&config())).is_err());
-        let mut wrong=bridge();
-        wrong["raito_bridge_url"]=serde_json::json!("https://different.example");
-        assert!(select_offline(&select(None,Some(wrong)),&request(),&job(),Some(&config())).is_err());
-        let mut bad=bridge();
-        bad["raito_bridge_url"]=serde_json::json!("http://api.raito.wtf");
-        assert!(select_offline(&select(None,Some(bad)),&request(),&job(),Some(&config())).is_err());
+        let ok = select_offline(
+            &select(None, Some(bridge())),
+            &request(),
+            &job(),
+            Some(&config()),
+        )
+        .unwrap();
+        assert_eq!(ok.acceptance, "UNVERIFIED");
+        assert_eq!(ok.availability, "NOT_CHECKED");
+        assert_eq!(ok.bytes, None);
+        assert!(select_offline(&select(None, Some(bridge())), &request(), &job(), None).is_err());
+        let mut wrong = bridge();
+        wrong["client_sha256"] = serde_json::json!("ef".repeat(32));
+        assert!(select_offline(
+            &select(None, Some(wrong)),
+            &request(),
+            &job(),
+            Some(&config())
+        )
+        .is_err());
+        let mut wrong = bridge();
+        wrong["raito_bridge_url"] = serde_json::json!("https://different.example");
+        assert!(select_offline(
+            &select(None, Some(wrong)),
+            &request(),
+            &job(),
+            Some(&config())
+        )
+        .is_err());
+        let mut bad = bridge();
+        bad["raito_bridge_url"] = serde_json::json!("http://api.raito.wtf");
+        assert!(select_offline(
+            &select(None, Some(bad)),
+            &request(),
+            &job(),
+            Some(&config())
+        )
+        .is_err());
     }
     #[test]
     fn request_identity_and_schema_mismatch_rejected() {
-        let decl=select(None,Some(bridge()));
-        let mut mismatched:serde_json::Value=serde_json::from_slice(&request()).unwrap();
-        mismatched["block_height"]=serde_json::json!(301);
-        assert!(select_offline(&decl,&mismatched.to_string().into_bytes(),&job(),Some(&config())).is_err());
-        mismatched["block_height"]=serde_json::json!(300);
-        mismatched["network"]=serde_json::json!("signet");
-        assert!(select_offline(&decl,&mismatched.to_string().into_bytes(),&job(),Some(&config())).is_err());
-        assert!(select_offline(&decl,&vec![b'x';4097],&job(),Some(&config())).is_err());
-        let unknown=serde_json::json!({"schema":SELECTION_SCHEMA,"bridge":bridge(),
-            "unexpected":true}).to_string();
-        assert!(select_offline(unknown.as_bytes(),&request(),&job(),Some(&config())).is_err());
+        let decl = select(None, Some(bridge()));
+        let mut mismatched: serde_json::Value = serde_json::from_slice(&request()).unwrap();
+        mismatched["block_height"] = serde_json::json!(301);
+        assert!(select_offline(
+            &decl,
+            &mismatched.to_string().into_bytes(),
+            &job(),
+            Some(&config())
+        )
+        .is_err());
+        mismatched["block_height"] = serde_json::json!(300);
+        mismatched["network"] = serde_json::json!("signet");
+        assert!(select_offline(
+            &decl,
+            &mismatched.to_string().into_bytes(),
+            &job(),
+            Some(&config())
+        )
+        .is_err());
+        assert!(select_offline(&decl, &vec![b'x'; 4097], &job(), Some(&config())).is_err());
+        let unknown = serde_json::json!({"schema":SELECTION_SCHEMA,"bridge":bridge(),
+            "unexpected":true})
+        .to_string();
+        assert!(select_offline(unknown.as_bytes(), &request(), &job(), Some(&config())).is_err());
     }
     #[test]
     fn local_bytes_hash_and_limits_are_observations_only() {
-        let dir=temp_dir();
-        let p=dir.join("synthetic.bin");
-        fs::write(&p,b"synthetic-not-raito").unwrap();
-        let payload=b"synthetic-not-raito";
-        let ok=select_offline(&select(Some(local(&p,payload)),None),
-            &request(),&job(),None).unwrap();
-        assert_eq!(ok.kind,"declared_local_artifact");
-        assert_eq!(ok.integrity,"declared_bytes_sha256_match");
-        assert_eq!(ok.acceptance,"UNVERIFIED");
-        assert!(select_offline(&select(Some(local(&p,b"wrong")),None),
-            &request(),&job(),None).is_err());
-        assert!(select_offline(&select(Some(local(&dir.join("missing"),payload)),None),
-            &request(),&job(),None).is_err());
-        fs::write(&p,vec![b'x';(MAX_COMPRESSED_PROOF_BYTES+1) as usize]).unwrap();
-        assert!(select_offline(&select(Some(local(&p,&[b'x'])),None),
-            &request(),&job(),None).is_err());
+        let dir = temp_dir();
+        let p = dir.join("synthetic.bin");
+        fs::write(&p, b"synthetic-not-raito").unwrap();
+        let payload = b"synthetic-not-raito";
+        let ok = select_offline(
+            &select(Some(local(&p, payload)), None),
+            &request(),
+            &job(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ok.kind, "declared_local_artifact");
+        assert_eq!(ok.integrity, "declared_bytes_sha256_match");
+        assert_eq!(ok.acceptance, "UNVERIFIED");
+        assert!(select_offline(
+            &select(Some(local(&p, b"wrong")), None),
+            &request(),
+            &job(),
+            None
+        )
+        .is_err());
+        assert!(select_offline(
+            &select(Some(local(&dir.join("missing"), payload)), None),
+            &request(),
+            &job(),
+            None
+        )
+        .is_err());
+        fs::write(&p, vec![b'x'; (MAX_COMPRESSED_PROOF_BYTES + 1) as usize]).unwrap();
+        assert!(select_offline(
+            &select(Some(local(&p, &[b'x'])), None),
+            &request(),
+            &job(),
+            None
+        )
+        .is_err());
         fs::remove_dir_all(dir).unwrap();
     }
     #[cfg(unix)]
     #[test]
     fn symlinked_artifact_refused() {
-        let dir=temp_dir();
-        let real=dir.join("real");let link=dir.join("link");
-        fs::write(&real,b"synthetic").unwrap();
-        std::os::unix::fs::symlink(&real,&link).unwrap();
-        assert!(select_offline(&select(Some(local(&link,b"synthetic")),None),
-            &request(),&job(),None).is_err());
+        let dir = temp_dir();
+        let real = dir.join("real");
+        let link = dir.join("link");
+        fs::write(&real, b"synthetic").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(select_offline(
+            &select(Some(local(&link, b"synthetic")), None),
+            &request(),
+            &job(),
+            None
+        )
+        .is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }
