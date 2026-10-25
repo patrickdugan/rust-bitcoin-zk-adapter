@@ -336,7 +336,7 @@ mod tests {
         .is_err());
         fs::write(&p, vec![b'x'; (MAX_COMPRESSED_PROOF_BYTES + 1) as usize]).unwrap();
         assert!(select_offline(
-            &select(Some(local(&p, &[b'x'])), None),
+            &select(Some(local(&p, b"x")), None),
             &request(),
             &job(),
             None
