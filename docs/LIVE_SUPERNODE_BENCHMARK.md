@@ -171,10 +171,14 @@ a verified result.
 **Bounded proof retrieval:** The reporter enforces the pinned verifier
 broker's **16 MiB compressed-proof limit**. It requests **64 KiB** chunks
 and stops after at most **256 chunks** or **660 seconds**. Every chunk must
-match the requested job ID and saved result SHA-256, report the same bounded
-`total_bytes`, have contiguous `offset`/`next_offset` values, contain
-strict even-length hexadecimal data of the expected chunk length, and carry
-the correct boolean `complete` marker. When the job status supplies
+match the requested job ID and saved result SHA-256, return a typed
+`verified_statement` identical to the previously validated receipt on
+**every chunk** (including exact field types and no missing/extra claims),
+report the same bounded `total_bytes`, have contiguous
+`offset`/`next_offset` values, contain strict even-length hexadecimal
+data of the expected chunk length, and carry the correct boolean `complete`
+marker. A chunk whose statement changes mid-transfer is rejected even if
+its bytes and SHA-256 otherwise match. When the job status supplies
 `result_bytes`, the declared proof length must match it. The transfer
 fails closed on inconsistent claims, malformed bytes or short chunks,
 preserving the report's `verification_error`. This establishes transfer
