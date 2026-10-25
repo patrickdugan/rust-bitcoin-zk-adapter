@@ -141,6 +141,14 @@ process and filesystem limits must still be applied by the service manager.
 - Ark-specific adapters: funding, exit, forfeit and challenge evidence,
   with VTXO tree rules kept inside Ark components.
 
+## Research-only proving roadmap
+
+A separate [distributed proving and post-quantum STARK research RFC](RFC_DISTRIBUTED_PROVING.md)
+proposes conditional header shards, lightweight SNARK reference circuits, and
+longer-term post-quantum backends alongside the independent SSD-backed Raito
+memory experiment. This RFC does not change current gateway verification,
+Bitcoin Core consensus authority, or the existing Raito receipt contract.
+
 ## Measurement plan
 
 Collect p50/p95/p99 RPC latency and upstream bytes transferred, peak RSS,
