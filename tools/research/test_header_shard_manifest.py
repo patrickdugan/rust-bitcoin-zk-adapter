@@ -211,7 +211,7 @@ class ShardStructureTests(unittest.TestCase):
 
     def test_bounds_and_untrusted_checkpoint_enforced(self):
         data = fixture()
-        data["shards"] = data["shards"] * 65
+        data["shards"] = data["shards"] * 17
         self.assert_rejected(data, "excessive shard")
         data = fixture()
         data["shards"] = []
