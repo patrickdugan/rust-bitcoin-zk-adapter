@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.benchmark_supernode import (
-    main, loopback_url, percentiles, require_hash, run_job,
+    cgroup_io_delta, main, loopback_url, percentiles, require_hash, run_job,
     select_cgroups, snapshot_cgroup, parse_cgroup_counter,
 )
 
@@ -41,6 +41,15 @@ class FakeControl:
         return {"job": {"id": "fixture-job"}}
 
 
+class MutatingControl(FakeControl):
+    def __init__(self, on_submit):
+        self.on_submit = on_submit
+
+    def call(self, method, params):
+        self.on_submit()
+        return super().call(method, params)
+
+
 class FakeRead:
     def call(self, method, params):
         assert method == "zk.proof.status"
@@ -65,9 +74,10 @@ class CgroupReportingTest(unittest.TestCase):
         return path
 
     @staticmethod
-    def job(cgroups):
+    def job(cgroups, on_submit=None):
         # The fake RPC returns completed_unverified; no node, proof or tokens.
-        return run_job(FakeRead(), FakeControl(), "fixture-artifact",
+        control = MutatingControl(on_submit) if on_submit else FakeControl()
+        return run_job(FakeRead(), control, "fixture-artifact",
                        "aa" * 32, "bb" * 32, 1, 1, cgroups)
 
     def test_separate_roles_and_two_device_totals(self):
@@ -94,6 +104,96 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertEqual(before["producer"]["swap_peak_bytes"], 0)
             self.assertEqual(before["producer"]["errors"], {})
             self.assertEqual(job["cgroups_after"]["verifier"]["memory_peak_bytes"], 444)
+
+    def test_interval_io_deltas_keep_producer_and_verifier_separate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            producer = self.fixture(base / "producer", io_stat=(
+                "8:0 rbytes=3 wbytes=5\\n8:16 rbytes=7 wbytes=11\\n"))
+            verifier = self.fixture(base / "verifier", io_stat=(
+                "8:0 rbytes=20 wbytes=22\\n"))
+
+            def advance():
+                (producer / "io.stat").write_text(
+                    "8:0 rbytes=10 wbytes=9\\n8:16 rbytes=13 wbytes=11\\n",
+                    encoding="ascii")
+                (verifier / "io.stat").write_text(
+                    "8:0 rbytes=20 wbytes=42\\n", encoding="ascii")
+
+            job = self.job(select_cgroups(None, producer, verifier), advance)
+            prod = job["cgroups_io_delta"]["producer"]
+            ver = job["cgroups_io_delta"]["verifier"]
+            self.assertEqual(prod["io_read_delta_bytes"], 13)
+            self.assertEqual(prod["io_write_delta_bytes"], 4)
+            self.assertEqual(ver["io_read_delta_bytes"], 0)
+            self.assertEqual(ver["io_write_delta_bytes"], 20)
+            self.assertEqual(prod["errors"], {})
+            self.assertEqual(ver["errors"], {})
+            self.assertEqual(job["cgroups_before"]["producer"]["io_read_bytes"], 10)
+            self.assertEqual(job["cgroups_after"]["producer"]["io_read_bytes"], 23)
+
+    def test_io_delta_rejects_per_device_reset_despite_increasing_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), io_stat=(
+                "8:0 rbytes=100 wbytes=10\\n8:16 rbytes=1 wbytes=0\\n"))
+            before = snapshot_cgroup(root)
+            (root / "io.stat").write_text(
+                "8:0 rbytes=90 wbytes=16\\n8:16 rbytes=500 wbytes=8\\n",
+                encoding="ascii")
+            delta = cgroup_io_delta(before, snapshot_cgroup(root))
+            self.assertIsNone(delta["io_read_delta_bytes"])
+            self.assertIn("decreased on 8:0", delta["errors"]["io_read_delta_bytes"])
+            self.assertEqual(delta["io_write_delta_bytes"], 14)
+
+    def test_io_delta_refuses_device_set_churn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), io_stat="8:0 rbytes=5 wbytes=6\\n")
+            before = snapshot_cgroup(root)
+            (root / "io.stat").write_text(
+                "8:0 rbytes=7 wbytes=8\\n8:16 rbytes=11 wbytes=12\\n",
+                encoding="ascii")
+            delta = cgroup_io_delta(before, snapshot_cgroup(root))
+            self.assertIsNone(delta["io_read_delta_bytes"])
+            self.assertIsNone(delta["io_write_delta_bytes"])
+            self.assertIn("device set changed", delta["errors"]["io_read_delta_bytes"])
+
+    def test_io_delta_keeps_unavailable_or_malformed_directions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), io_stat=None)
+            unavailable = snapshot_cgroup(root)
+            (root / "io.stat").write_text(
+                "8:0 rbytes=10 wbytes=4\\n", encoding="ascii")
+            delta = cgroup_io_delta(unavailable, snapshot_cgroup(root))
+            self.assertIsNone(delta["io_read_delta_bytes"])
+            self.assertIsNone(delta["io_write_delta_bytes"])
+            self.assertIn("unavailable", delta["errors"]["io_read_delta_bytes"])
+            (root / "io.stat").write_text(
+                "8:0 rbytes=invalid wbytes=4\\n", encoding="ascii")
+            bad_before = snapshot_cgroup(root)
+            (root / "io.stat").write_text(
+                "8:0 rbytes=15 wbytes=14\\n", encoding="ascii")
+            delta = cgroup_io_delta(bad_before, snapshot_cgroup(root))
+            self.assertIsNone(delta["io_read_delta_bytes"])
+            self.assertIn("before sample", delta["errors"]["io_read_delta_bytes"])
+            self.assertEqual(delta["io_write_delta_bytes"], 10)
+
+    def test_legacy_io_delta_retains_existing_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = self.fixture(Path(tmp) / "worker", io_stat=(
+                "8:0 rbytes=5 wbytes=7\\n"))
+
+            def advance():
+                (worker / "io.stat").write_text(
+                    "8:0 rbytes=8 wbytes=7\\n", encoding="ascii")
+
+            job = self.job(select_cgroups(worker, None, None), advance)
+            self.assertIn("cgroup_before", job)
+            self.assertIn("cgroup_after", job)
+            self.assertEqual(job["cgroup_io_delta"]["io_read_delta_bytes"], 3)
+            self.assertEqual(job["cgroup_io_delta"]["io_write_delta_bytes"], 0)
+            self.assertNotIn("cgroups_io_delta", job)
+            no_scope = self.job(select_cgroups(None, None, None))
+            self.assertNotIn("cgroup_io_delta", no_scope)
 
     def test_swapped_fixture_paths_remain_operator_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
