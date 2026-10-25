@@ -104,6 +104,15 @@ def percentiles(samples: list[float]) -> dict:
             "p99_ms": round(percentile(.99), 3)}
 
 
+class SelectedCgroups(dict):
+    """Resolved paths plus the filesystem identities seen at selection time."""
+
+    def __init__(self, paths: dict[str, Path],
+                 expected_identities: dict[str, dict]):
+        super().__init__(paths)
+        self.expected_identities = expected_identities
+
+
 def select_cgroups(worker: Path | None, producer: Path | None,
                    verifier: Path | None) -> dict[str, Path]:
     """Reject ambiguous labeling before reading credentials or sending RPCs."""
@@ -129,9 +138,15 @@ def select_cgroups(worker: Path | None, producer: Path | None,
         prod, ver = canonical["producer"], canonical["verifier"]
         if prod == ver or prod in ver.parents or ver in prod.parents:
             raise ValueError("producer and verifier cgroups must be distinct, non-overlapping paths")
-    # Keep reading the validated canonical path if a supplied symlink is
-    # later retargeted. Neither a resolved path nor its counters proves UID.
-    return canonical
+    # Bind paths to the directory identities observed before RPC and token
+    # access. A scope recreated later must not silently inherit the label.
+    identities = {}
+    for role, path in canonical.items():
+        identity = cgroup_fs_identity(path)
+        if identity is None:
+            raise ValueError(f"{role} cgroup directory unavailable during selection")
+        identities[role] = identity
+    return SelectedCgroups(canonical, identities)
 
 
 def cgroup_fs_identity(root: Path) -> dict | None:
@@ -171,7 +186,8 @@ def read_cgroup_counter_file(root: Path, filename: str, cap: int,
 
 
 
-def snapshot_cgroup(root: Path | None) -> dict:
+def snapshot_cgroup(root: Path | None,
+                    expected_identity: dict | None = None) -> dict:
     """Read one coherent cgroup scope through a pinned directory handle.
 
     Paths and role labels are operator supplied, never service attestations.
@@ -197,13 +213,15 @@ def snapshot_cgroup(root: Path | None) -> dict:
             "errors": {field: cause for field in fields},
         }
     try:
-        return _snapshot_cgroup_pinned(root, directory_fd, identity_before)
+        return _snapshot_cgroup_pinned(
+            root, directory_fd, identity_before, expected_identity)
     finally:
         os.close(directory_fd)
 
 
 def _snapshot_cgroup_pinned(root: Path, directory_fd: int,
-                            identity_before: dict | None) -> dict:
+                            identity_before: dict | None,
+                            expected_identity: dict | None = None) -> dict:
     """Sample only counter files belonging to the opened directory."""
     metadata = os.fstat(directory_fd)
     opened_identity = {"device": metadata.st_dev, "inode": metadata.st_ino}
@@ -284,16 +302,21 @@ def _snapshot_cgroup_pinned(root: Path, directory_fd: int,
                     else:
                         result[metric] = totals[field]
     identity_after = cgroup_fs_identity(root)
+    selection_changed = (expected_identity is not None
+                         and expected_identity != opened_identity)
     if (identity_before is None or identity_before != opened_identity
-            or identity_before != identity_after):
-        # This sample can straddle a removed/recreated directory. Refuse to
-        # combine counters from two cgroups, even if individual bytes parse.
+            or identity_before != identity_after or selection_changed):
+        # A once-valid path may have been replaced before the job started.
+        # Refuse all counters rather than attaching them to the old role.
         result["cgroup_fs_identity"] = None
         result["io_devices"] = None
+        cause = ("cgroup directory changed since selection"
+                 if selection_changed else
+                 "cgroup directory unavailable or changed during snapshot")
         for key in ("memory_current_bytes", "memory_peak_bytes",
                     "swap_peak_bytes", "io_read_bytes", "io_write_bytes"):
             result[key] = None
-            errors[key] = "cgroup directory unavailable or changed during snapshot"
+            errors[key] = cause
     else:
         result["cgroup_fs_identity"] = identity_before
     result["errors"] = errors
@@ -409,7 +432,11 @@ def measure_pair(core: RPC, gateway: RPC, height: int, samples: int) -> dict:
 def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
             policy: str, txid: str, memory_mib: int, deadline: float,
             cgroups: dict[str, Path]) -> dict:
-    before = {role: snapshot_cgroup(path) for role, path in cgroups.items()}
+    expected = getattr(cgroups, "expected_identities", {})
+    before = {
+        role: snapshot_cgroup(path, expected.get(role))
+        for role, path in cgroups.items()
+    }
     started = time.monotonic()
     response = gateway_control.call(
         "zk.proof.submit", ["raito", artifact_id, memory_mib, policy, txid])
@@ -435,7 +462,10 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
         "result_sha256": record.get("result_sha256"),
         "proof_verified": status == "verified_raito",
     }
-    after = {role: snapshot_cgroup(path) for role, path in cgroups.items()}
+    after = {
+        role: snapshot_cgroup(path, expected.get(role))
+        for role, path in cgroups.items()
+    }
     if "worker" in cgroups or not cgroups:
         # Preserve the original report keys for legacy and unconfigured runs.
         result["cgroup_before"] = before.get("worker", {})
