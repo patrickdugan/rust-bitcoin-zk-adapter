@@ -37,8 +37,24 @@ for f in empty.bin random.bin random.bin.bz2 mock-proof.bin zero-bomb.bin.bz2; d
   r=$( [ -s $W/$f.receipt ] && echo RECEIPT-WRITTEN || echo no-receipt)
   echo "$f: exit=$rc $r $(tail -1 $W/$f.err) | $(head -c 160 $W/$f.err | tr '\n' ' ')"
 done | tee $E/direct-rejections.log
+# Five deliberate non-proofs must each fail without writing any receipt.
+python3 - "$E/direct-rejections.log" <<'PY' || { echo "FAIL negative input rejections incomplete"; exit 1; }
+import re, sys
+lines = open(sys.argv[1], encoding="utf8").read().splitlines()
+for name in ("empty.bin", "random.bin", "random.bin.bz2",
+             "mock-proof.bin", "zero-bomb.bin.bz2"):
+    found = [line for line in lines if line.startswith(name + ": ")]
+    if len(found) != 1 or not re.search(r"\\bexit=[1-9][0-9]* no-receipt\\b", found[0]):
+        raise SystemExit("negative verifier case missing or unexpectedly accepted: " + name)
+PY
 echo "== wrong policy digest is refused before verification"
-$V --gateway $W/random.bin.bz2 $TX $BH 900000 $(printf 'ab%.0s' $(seq 32)) $W/p.receipt > /dev/null 2> $W/p.err; echo "wrong-policy exit=$? $(head -c 160 $W/p.err)" | tee -a $E/direct-rejections.log
+$V --gateway $W/random.bin.bz2 $TX $BH 900000 $(printf 'ab%.0s' $(seq 32)) $W/p.receipt > /dev/null 2> $W/p.err
+wrong_policy_exit=$?
+echo "wrong-policy exit=$wrong_policy_exit $(head -c 160 $W/p.err)" | tee -a $E/direct-rejections.log
+if [ "$wrong_policy_exit" -eq 0 ] || [ -s "$W/p.receipt" ]; then
+  echo "FAIL pinned Raito verifier accepted a mismatched policy"
+  exit 1
+fi
 
 echo "== real verifier behind the isolated broker (third UID): synthetic job must stay unverified"
 bash $K/setup.sh > $E/setup.log 2>&1
