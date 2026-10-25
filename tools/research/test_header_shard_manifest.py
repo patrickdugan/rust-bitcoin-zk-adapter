@@ -112,6 +112,10 @@ class ShardStructureTests(unittest.TestCase):
                     state[field] += 1
                 elif field == "last_nbits_hex":
                     state[field] = "1d00fffe"
+                elif field == "cumulative_work_hex":
+                    # Keep the forged work strictly increasing, so that
+                    # rejection specifically tests adjacent-state equality.
+                    state[field] = f"{int(state[field], 16) + 1:064x}"
                 else:
                     state[field] = "bb" * 32
                 self.assert_rejected(data, "changed shard boundary context")
