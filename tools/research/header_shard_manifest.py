@@ -23,7 +23,7 @@ SHARD_KEYS = frozenset({
     "claimed_segment_digest",
 })
 MAX_MANIFEST_BYTES = 128 * 1024
-MAX_SHARDS = 256
+MAX_SHARDS = 64
 MAX_HEADERS_PER_SHARD = 512
 MAX_NEXT_HEIGHT = 1 << 32
 NETWORK = "bitcoin-mainnet"
