@@ -108,6 +108,10 @@ systemd-analyze verify /etc/systemd/system/supernode-gateway.service \
   /etc/systemd/system/supernode-raito-verifier.service > $E/systemd-analyze-verify.log 2>&1 && rc=0 || rc=$?
 echo "verify_exit=$rc"
 cat $E/systemd-analyze-verify.log
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL systemd unit verification returned $rc"
+  exit 1
+fi
 systemctl start rbzk-mockcore
 systemctl start supernode-gateway   # pulls in both brokers via Requires=
 sleep 3
