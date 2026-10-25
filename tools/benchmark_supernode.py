@@ -144,6 +144,9 @@ def snapshot_cgroup(root: Path | None) -> dict:
     result = {key: None for key in (
         "memory_current_bytes", "memory_peak_bytes", "swap_peak_bytes",
         "io_read_bytes", "io_write_bytes")}
+    # Preserve per-device identity to detect resets and device-set churn when
+    # deriving I/O deltas. None indicates an unavailable io.stat sample.
+    result["io_devices"] = None
     errors = {}
     for name, key in (("memory.current", "memory_current_bytes"),
                       ("memory.peak", "memory_peak_bytes"),
@@ -173,6 +176,7 @@ def snapshot_cgroup(root: Path | None) -> dict:
             totals = {"rbytes": 0, "wbytes": 0}
             fields = {"rbytes": "io_read_bytes", "wbytes": "io_write_bytes"}
             devices = set()
+            result["io_devices"] = {}
             for tokens in rows:
                 device = tokens[0]
                 if not re.fullmatch(r"[0-9]+:[0-9]+", device) or device in devices:
@@ -191,17 +195,76 @@ def snapshot_cgroup(root: Path | None) -> dict:
                         malformed = True
                         break
                     values[key] = value
+                result["io_devices"][device] = {}
                 for field, metric in fields.items():
                     raw = values.get(field)
                     parsed = parse_cgroup_counter(raw)
                     if malformed or parsed is None:
                         errors[metric] = f"io.stat malformed: {field} missing or invalid on {device}"
+                        result["io_devices"][device][field] = None
                     else:
                         totals[field] += parsed
+                        result["io_devices"][device][field] = parsed
             for field, metric in fields.items():
                 if metric not in errors:
-                    result[metric] = totals[field]
+                    if totals[field] > MAX_CGROUP_COUNTER:
+                        errors[metric] = f"io.stat {field} total exceeds unsigned 64-bit range"
+                    else:
+                        result[metric] = totals[field]
     result["errors"] = errors
+    return result
+
+
+
+def cgroup_io_delta(before: dict, after: dict) -> dict:
+    """Calculate trustworthy counter differences for unchanged device sets.
+
+    Values describe the selected cgroup path only. Verify service identity
+    independently, and treat recreated/reset counters as unavailable.
+    """
+    result = {
+        "io_read_delta_bytes": None, "io_write_delta_bytes": None, "errors": {},
+    }
+    left, right = before.get("io_devices"), after.get("io_devices")
+    measurements = (
+        ("rbytes", "io_read_bytes", "io_read_delta_bytes"),
+        ("wbytes", "io_write_bytes", "io_write_delta_bytes"),
+    )
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        for _, field, output in measurements:
+            cause = (before.get("errors", {}).get(field) or
+                     after.get("errors", {}).get(field))
+            result["errors"][output] = cause or "io.stat unavailable in before or after sample"
+        return result
+    if left.keys() != right.keys():
+        for _, _, output in measurements:
+            result["errors"][output] = "io.stat device set changed between samples"
+        return result
+    for raw, field, output in measurements:
+        cause = before.get("errors", {}).get(field)
+        if cause:
+            result["errors"][output] = f"before sample: {cause}"
+            continue
+        cause = after.get("errors", {}).get(field)
+        if cause:
+            result["errors"][output] = f"after sample: {cause}"
+            continue
+        amount = 0
+        for device in sorted(left):
+            previous = left[device].get(raw)
+            current = right[device].get(raw)
+            if not isinstance(previous, int) or not isinstance(current, int):
+                result["errors"][output] = f"io.stat {raw} unavailable on {device}"
+                break
+            if current < previous:
+                result["errors"][output] = f"io.stat {raw} decreased on {device}"
+                break
+            amount += current - previous
+        if output not in result["errors"]:
+            if amount > MAX_CGROUP_COUNTER:
+                result["errors"][output] = "I/O interval total exceeds unsigned 64-bit range"
+            else:
+                result[output] = amount
     return result
 
 
@@ -282,9 +345,14 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
         # Preserve the original report keys for legacy and unconfigured runs.
         result["cgroup_before"] = before.get("worker", {})
         result["cgroup_after"] = after.get("worker", {})
+        if "worker" in cgroups:
+            result["cgroup_io_delta"] = cgroup_io_delta(before["worker"], after["worker"])
     else:
         result["cgroups_before"] = before
         result["cgroups_after"] = after
+        result["cgroups_io_delta"] = {
+            role: cgroup_io_delta(before[role], after[role]) for role in cgroups
+        }
     if status == "verified_raito":
         receipt = gateway_read.call("zk.proof.receipt", [job_id])
         if receipt["verified_statement"]["txid"] != txid:
