@@ -26,6 +26,11 @@ PENDING = {"queued", "running", "verifying_raito"}
 MAX_CGROUP_COUNTER = (1 << 64) - 1
 MAX_CGROUP_METRIC_BYTES = 128
 MAX_CGROUP_IO_STAT_BYTES = 128 * 1024
+# Matches the pinned verifier broker's compressed Raito upload contract.
+MAX_VERIFIED_PROOF_BYTES = 16 * 1024 * 1024
+PROOF_CHUNK_BYTES = 64 * 1024
+MAX_PROOF_CHUNKS = MAX_VERIFIED_PROOF_BYTES // PROOF_CHUNK_BYTES
+MAX_PROOF_DOWNLOAD_SECONDS = 660
 
 
 class UniqueCgroupPath(argparse.Action):
@@ -406,27 +411,72 @@ def require_selected_scopes_unchanged(cgroups: dict[str, Path],
             )
 
 
-def proof_retrieve(gateway: RPC, job_id: str, expected_sha: str) -> dict:
+def proof_retrieve(gateway: RPC, job_id: str, expected_sha: str,
+                   expected_bytes: int | None = None) -> dict:
+    """Retrieve a bounded compressed Raito artifact from verified gateway RPC.
+
+    The gateway's typed STARK receipt and Core chain checks are separate
+    prerequisites. This routine validates bytes and transfer metadata only.
+    """
+    expected_sha = require_hash(expected_sha)
+    if expected_bytes is not None and (
+            type(expected_bytes) is not int
+            or not 1 <= expected_bytes <= MAX_VERIFIED_PROOF_BYTES):
+        raise ValueError("invalid job-record compressed proof length")
     digest = hashlib.sha256()
     total = 0
-    chunks = 0
+    reported_length = None
     before = time.monotonic()
-    while True:
-        resp = gateway.call("zk.proof.get", [job_id, total, 65536])
-        if resp.get("proof_verified") is not True:
+    for chunks in range(1, MAX_PROOF_CHUNKS + 1):
+        if time.monotonic() - before > MAX_PROOF_DOWNLOAD_SECONDS:
+            raise RuntimeError("compressed Raito proof retrieval exceeded deadline")
+        resp = gateway.call("zk.proof.get", [job_id, total, PROOF_CHUNK_BYTES])
+        if not isinstance(resp, dict) or resp.get("proof_verified") is not True:
             raise RuntimeError("verified proof retrieval lost verified statement")
-        data = bytes.fromhex(resp["data_hex"])
-        if not data or resp["offset"] != total:
-            raise RuntimeError("empty chunk or incorrect retrieval offset")
+        if resp.get("job_id") != job_id:
+            raise RuntimeError("retrieved chunk belongs to a different proof job")
+        claimed_digest = resp.get("result_sha256")
+        if (not isinstance(claimed_digest, str)
+                or require_hash(claimed_digest) != expected_sha):
+            raise RuntimeError("retrieved proof SHA-256 claim differs from job record")
+
+        declared = resp.get("total_bytes")
+        if (type(declared) is not int
+                or not 1 <= declared <= MAX_VERIFIED_PROOF_BYTES):
+            raise RuntimeError("retrieved compressed proof exceeds 16 MiB limit")
+        if reported_length is None:
+            reported_length = declared
+            if expected_bytes is not None and declared != expected_bytes:
+                raise RuntimeError("proof length differs from job record")
+        elif declared != reported_length:
+            raise RuntimeError("retrieved total_bytes changed between chunks")
+
+        data_hex = resp.get("data_hex")
+        if (not isinstance(data_hex, str)
+                or not 0 < len(data_hex) <= PROOF_CHUNK_BYTES * 2
+                or len(data_hex) % 2 != 0
+                or re.fullmatch(r"[0-9a-fA-F]+", data_hex) is None):
+            raise RuntimeError("malformed or oversized proof chunk")
+        data = bytes.fromhex(data_hex)
+        expected_count = min(PROOF_CHUNK_BYTES, declared - total)
+        if (not expected_count or len(data) != expected_count
+                or type(resp.get("offset")) is not int
+                or resp["offset"] != total
+                or type(resp.get("next_offset")) is not int
+                or resp["next_offset"] != total + len(data)):
+            raise RuntimeError("proof chunk size or offset inconsistent with declared length")
+        complete = resp.get("complete")
+        if type(complete) is not bool or complete != (total + len(data) == declared):
+            raise RuntimeError("proof chunk completion marker inconsistent with declared length")
+
         digest.update(data)
         total += len(data)
-        chunks += 1
-        if resp.get("complete") is True:
-            if total != resp["total_bytes"]:
-                raise RuntimeError("proof result length mismatch")
+        if complete:
             break
+    else:
+        raise RuntimeError("compressed proof exceeded maximum chunk count")
     actual = digest.hexdigest()
-    if actual != expected_sha.lower():
+    if actual != expected_sha:
         raise RuntimeError("reassembled proof SHA-256 mismatch")
     return {"proof_bytes": total, "chunks": chunks,
             "download_seconds": round(time.monotonic() - before, 3),
@@ -526,7 +576,10 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
             receipt = gateway_read.call("zk.proof.receipt", [job_id])
             if receipt["verified_statement"]["txid"] != txid:
                 raise ValueError("receipt transaction differs from benchmark request")
-            fetched = proof_retrieve(gateway_read, job_id, record["result_sha256"])
+            fetched = proof_retrieve(
+                gateway_read, job_id, record["result_sha256"],
+                record.get("result_bytes")
+            )
         except Exception as exc:
             # A gateway's status alone cannot count as a fully checked
             # receipt or a locally reassembled, SHA-256-matched proof.
