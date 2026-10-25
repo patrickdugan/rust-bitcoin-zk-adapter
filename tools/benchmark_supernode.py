@@ -146,14 +146,18 @@ def cgroup_fs_identity(root: Path) -> dict | None:
 
 
 
-def read_cgroup_counter_file(root: Path, filename: str, cap: int) -> str:
+def read_cgroup_counter_file(root: Path, filename: str, cap: int,
+                             *, dir_fd: int | None = None) -> str:
     """Read bounded ASCII from a regular cgroup file without following links.
 
     O_NONBLOCK also prevents a swapped-in FIFO from stalling the benchmark.
     This is a Linux cgroup-v2 reader; kernel enforcement is checked elsewhere.
     """
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-    fd = os.open(root / filename, flags)
+    # A directory descriptor pins all counters to the same filesystem
+    # object if the path is renamed/replaced while a snapshot is running.
+    target = filename if dir_fd is not None else root / filename
+    fd = os.open(target, flags, dir_fd=dir_fd)
     with os.fdopen(fd, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError("not a regular counter file")
@@ -168,16 +172,41 @@ def read_cgroup_counter_file(root: Path, filename: str, cap: int) -> str:
 
 
 def snapshot_cgroup(root: Path | None) -> dict:
-    """Read cgroup-v2 counters without inventing zeros for absent data.
+    """Read one coherent cgroup scope through a pinned directory handle.
 
-    Paths and role labels are supplied by the operator; counter files do not
-    authenticate the owning service. memory.peak may predate the job.
+    Paths and role labels are operator supplied, never service attestations.
     """
     if root is None:
         return {}
     if not root.is_absolute():
         raise ValueError("cgroup path must be absolute")
     identity_before = cgroup_fs_identity(root)
+    # O_DIRECTORY|O_NOFOLLOW rejects a replaced symlink at the final
+    # component. dir_fd below prevents mixing two scopes during rename.
+    try:
+        directory_fd = os.open(
+            root, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY)
+    except OSError as exc:
+        fields = ("memory_current_bytes", "memory_peak_bytes",
+                  "swap_peak_bytes", "io_read_bytes", "io_write_bytes")
+        cause = f"cgroup directory unavailable: {type(exc).__name__}"
+        return {
+            **{field: None for field in fields},
+            "io_devices": None,
+            "cgroup_fs_identity": None,
+            "errors": {field: cause for field in fields},
+        }
+    try:
+        return _snapshot_cgroup_pinned(root, directory_fd, identity_before)
+    finally:
+        os.close(directory_fd)
+
+
+def _snapshot_cgroup_pinned(root: Path, directory_fd: int,
+                            identity_before: dict | None) -> dict:
+    """Sample only counter files belonging to the opened directory."""
+    metadata = os.fstat(directory_fd)
+    opened_identity = {"device": metadata.st_dev, "inode": metadata.st_ino}
     result = {key: None for key in (
         "memory_current_bytes", "memory_peak_bytes", "swap_peak_bytes",
         "io_read_bytes", "io_write_bytes")}
@@ -189,7 +218,8 @@ def snapshot_cgroup(root: Path | None) -> dict:
                       ("memory.peak", "memory_peak_bytes"),
                       ("memory.swap.peak", "swap_peak_bytes")):
         try:
-            raw = read_cgroup_counter_file(root, name, MAX_CGROUP_METRIC_BYTES).strip()
+            raw = read_cgroup_counter_file(root, name, MAX_CGROUP_METRIC_BYTES,
+                                           dir_fd=directory_fd).strip()
         except OSError as exc:
             errors[key] = f"{name} unavailable: {type(exc).__name__}"
             continue
@@ -203,7 +233,8 @@ def snapshot_cgroup(root: Path | None) -> dict:
             result[key] = parsed
 
     try:
-        raw_io = read_cgroup_counter_file(root, "io.stat", MAX_CGROUP_IO_STAT_BYTES)
+        raw_io = read_cgroup_counter_file(root, "io.stat", MAX_CGROUP_IO_STAT_BYTES,
+                                          dir_fd=directory_fd)
     except (OSError, ValueError) as exc:
         cause = ("malformed" if isinstance(exc, ValueError) else "unavailable")
         for key in ("io_read_bytes", "io_write_bytes"):
@@ -253,7 +284,8 @@ def snapshot_cgroup(root: Path | None) -> dict:
                     else:
                         result[metric] = totals[field]
     identity_after = cgroup_fs_identity(root)
-    if identity_before is None or identity_before != identity_after:
+    if (identity_before is None or identity_before != opened_identity
+            or identity_before != identity_after):
         # This sample can straddle a removed/recreated directory. Refuse to
         # combine counters from two cgroups, even if individual bytes parse.
         result["cgroup_fs_identity"] = None
