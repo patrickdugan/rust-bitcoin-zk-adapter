@@ -11,20 +11,27 @@ bash $K/setup.sh 2>&1 | tee $E/setup.log || { echo "FAIL setup did not complete"
 echo; bash $K/probes.sh 2>&1 | tee $E/probes.log
 echo; echo "== benchmark harness against the synthetic deployment (dual cgroups)"
 BH=$(python3 -c 'import hashlib;print(hashlib.sha256(b"rbzk-synthetic-900000").hexdigest())')
-(cd $T && SUPERNODE_RPC_TOKEN=$(cat /root/rbzk-secrets/read) SUPERNODE_CONTROL_TOKEN=$(cat /root/rbzk-secrets/control) \
+if (cd "$T" && SUPERNODE_RPC_TOKEN=$(cat /root/rbzk-secrets/read) SUPERNODE_CONTROL_TOKEN=$(cat /root/rbzk-secrets/control) \
   timeout 300 python3 tools/benchmark_supernode.py --core-url http://127.0.0.1:18332 \
-  --core-cookie /root/rbzk-secrets/core.cookie --height 900000 --blockhash $BH \
+  --core-cookie /root/rbzk-secrets/core.cookie --height 900000 --blockhash "$BH" \
   --txid $(printf 'cd%.0s' $(seq 32)) --policy-sha256 $(printf 'ab%.0s' $(seq 32)) \
   --memory-mib 1024 --rpc-samples 10 --runs 1 --timeout-seconds 120 \
   --producer-cgroup /sys/fs/cgroup/system.slice/supernode-proof-worker-broker.service \
   --verifier-cgroup /sys/fs/cgroup/system.slice/supernode-raito-verifier.service \
-  --output $E/benchmark-synthetic.json > $E/benchmark-stdout.log 2>&1; echo "harness_exit=$?")
-python3 - $E/benchmark-synthetic.json <<'PY'
+  --output "$E/benchmark-synthetic.json" > "$E/benchmark-stdout.log" 2>&1); then
+  echo "harness_exit=0"
+else
+  code=$?
+  echo "harness_exit=$code"
+  echo "FAIL synthetic benchmark harness returned $code"
+  result=1
+fi
+python3 - "$E/benchmark-synthetic.json" <<'PY' || { echo "FAIL synthetic benchmark report unavailable"; result=1; }
 import json, sys
 try:
     r = json.load(open(sys.argv[1]))
 except Exception as e:
-    print("no harness report:", e); raise SystemExit
+    print("no harness report:", e); raise SystemExit(1)
 j = r["jobs"][0]
 print("status", j["status"], "proof_verified", j["proof_verified"], "obs_complete", j["observation_complete"],
       "transitions", j["observed_status_transitions_seconds"])
