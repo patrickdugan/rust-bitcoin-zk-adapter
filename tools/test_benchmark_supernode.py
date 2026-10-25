@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from tools.benchmark_supernode import (
     main, loopback_url, percentiles, require_hash, run_job,
-    select_cgroups, snapshot_cgroup,
+    select_cgroups, snapshot_cgroup, parse_cgroup_counter,
 )
 
 
@@ -128,6 +128,65 @@ class CgroupReportingTest(unittest.TestCase):
                 self.assertIn(key, snap["errors"])
             self.assertEqual(snap["io_write_bytes"], 32)
             self.assertNotIn("io_write_bytes", snap["errors"])
+
+    def test_unsigned_counter_bounds_and_malformed_decimal_input(self):
+        self.assertEqual(parse_cgroup_counter("0"), 0)
+        self.assertEqual(parse_cgroup_counter(str((1 << 64) - 1)), (1 << 64) - 1)
+        for value in (None, "", "-1", "+1", "1.0", "0xff",
+                      str(1 << 64), "9" * 5000):
+            with self.subTest(value=(value or "")[:32]):
+                self.assertIsNone(parse_cgroup_counter(value))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(
+                Path(tmp), current="9" * 5000, peak=str(1 << 64),
+                swap="0", io_stat="8:0 rbytes=" + "9" * 5000 + " wbytes=0\\n")
+            snap = snapshot_cgroup(root)
+            for field in ("memory_current_bytes", "memory_peak_bytes",
+                          "io_read_bytes"):
+                self.assertIsNone(snap[field])
+                self.assertIn(field, snap["errors"])
+            self.assertEqual(snap["swap_peak_bytes"], 0)
+            self.assertEqual(snap["io_write_bytes"], 0)
+
+    def test_selected_cgroup_path_resists_symlink_retargeting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            producer = self.fixture(base / "producer", current=17)
+            verifier = self.fixture(base / "verifier", current=51)
+            alias = base / "producer-alias"
+            alias.symlink_to(producer, target_is_directory=True)
+            selected = select_cgroups(None, alias, verifier)
+            self.assertEqual(selected["producer"], producer.resolve())
+            self.assertEqual(selected["verifier"], verifier.resolve())
+            alias.unlink()
+            alias.symlink_to(verifier, target_is_directory=True)
+            job = self.job(selected)
+            self.assertEqual(job["cgroups_before"]["producer"]["memory_current_bytes"], 17)
+            self.assertEqual(job["cgroups_before"]["verifier"]["memory_current_bytes"], 51)
+
+    def test_repeated_cgroup_flags_rejected_before_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            producer = self.fixture(base / "producer")
+            verifier = self.fixture(base / "verifier")
+            common = ["benchmark_supernode.py",
+                      "--core-cookie", str(base / "nonexistent.cookie"),
+                      "--height", "1", "--blockhash", "aa" * 32,
+                      "--txid", "bb" * 32, "--policy-sha256", "cc" * 32]
+            for role, other in (
+                ("--worker-cgroup", []),
+                ("--producer-cgroup", ["--verifier-cgroup", str(verifier)]),
+                ("--verifier-cgroup", ["--producer-cgroup", str(producer)]),
+            ):
+                for second in (str(verifier), str(producer)):
+                    argv = common + [role, str(producer), f"{role}={second}"] + other
+                    with self.subTest(role=role, second=second):
+                        stderr = io.StringIO()
+                        with patch.object(sys, "argv", argv), contextlib.redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as exit_status:
+                                main()
+                        self.assertEqual(exit_status.exception.code, 2)
+                        self.assertIn("supplied more than once", stderr.getvalue())
 
     def test_missing_device_field_and_repeated_devices_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
