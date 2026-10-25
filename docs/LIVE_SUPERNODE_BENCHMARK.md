@@ -96,6 +96,14 @@ kernel sampling cannot prove the producer/verifier identities or job ownership.
 Filesystem device/inode values can be reused and do not authenticate a
 service, UID, process membership or actual kernel resource limit. They
 provide an additional best-effort guard against scope recreation.
+Each snapshot now opens the cgroup directory once and reads all counter
+files relative to that pinned directory descriptor. This prevents a
+transient rename/replacement of the path from mixing producer/verifier
+counter files inside one snapshot. The final directory component must
+remain a real directory rather than a symlink. A missing or replaced
+directory makes its counters unavailable. Before/after snapshots still
+require matching filesystem identities; neither descriptor pinning nor
+inode comparison authenticates which service performed the work.
 The original `cgroup_before`/`cgroup_after` and `cgroups_before`/
 `cgroups_after` fields remain available for existing readers; unconfigured
 legacy runs continue to return empty snapshots without an interval delta.
