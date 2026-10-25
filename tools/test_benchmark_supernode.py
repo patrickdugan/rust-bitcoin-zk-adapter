@@ -10,9 +10,10 @@ import unittest
 from unittest.mock import Mock, patch
 
 from tools.benchmark_supernode import (
-    cgroup_io_delta, main, loopback_url, percentiles, require_hash, run_job,
-    select_cgroups, snapshot_cgroup, parse_cgroup_counter,
+    cgroup_io_delta, main, loopback_url, percentiles, proof_retrieve,
+    require_hash, run_job, select_cgroups, snapshot_cgroup, parse_cgroup_counter,
     read_cgroup_counter_file, MAX_CGROUP_IO_STAT_BYTES, MAX_CGROUP_METRIC_BYTES,
+    MAX_VERIFIED_PROOF_BYTES, PROOF_CHUNK_BYTES, MAX_PROOF_DOWNLOAD_SECONDS,
 )
 
 
@@ -61,6 +62,137 @@ class FakeRead:
             "error": "fixture only",
             "result_sha256": None,
         }}
+
+
+class SyntheticChunkGateway:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.calls = []
+
+    def call(self, method, params):
+        assert method == "zk.proof.get"
+        self.calls.append(params)
+        return next(self.responses)
+
+
+class ProofRetrievalTest(unittest.TestCase):
+    @staticmethod
+    def chunks_for(payload: bytes, job: str = "fixture-job") -> list[dict]:
+        digest = hashlib.sha256(payload).hexdigest()
+        return [
+            {
+                "job_id": job,
+                "result_sha256": digest,
+                "proof_verified": True,
+                "total_bytes": len(payload),
+                "offset": offset,
+                "next_offset": min(offset + PROOF_CHUNK_BYTES, len(payload)),
+                "data_hex": payload[offset:offset + PROOF_CHUNK_BYTES].hex(),
+                "complete": offset + PROOF_CHUNK_BYTES >= len(payload),
+            }
+            for offset in range(0, len(payload), PROOF_CHUNK_BYTES)
+        ]
+
+    def test_two_chunk_proof_has_consistent_length_hash_and_offsets(self):
+        payload = bytes(range(256)) * 256 + b"z"
+        digest = hashlib.sha256(payload).hexdigest()
+        server = SyntheticChunkGateway(self.chunks_for(payload))
+        report = proof_retrieve(server, "fixture-job", digest, len(payload))
+        self.assertEqual(report["proof_bytes"], len(payload))
+        self.assertEqual(report["chunks"], 2)
+        self.assertEqual(report["proof_sha256"], digest)
+        self.assertTrue(report["digest_matches_job"])
+        self.assertEqual(
+            server.calls,
+            [["fixture-job", 0, PROOF_CHUNK_BYTES],
+             ["fixture-job", PROOF_CHUNK_BYTES, PROOF_CHUNK_BYTES]],
+        )
+
+    def test_declared_size_outside_verifier_limit_is_rejected_at_first_chunk(self):
+        payload = b"example"
+        digest = hashlib.sha256(payload).hexdigest()
+        for total in (0, -1, True, "7", MAX_VERIFIED_PROOF_BYTES + 1):
+            with self.subTest(total=total):
+                response = self.chunks_for(payload)[0]
+                response["total_bytes"] = total
+                gateway = SyntheticChunkGateway([response])
+                with self.assertRaisesRegex(RuntimeError, "16 MiB"):
+                    proof_retrieve(gateway, "fixture-job", digest)
+                self.assertEqual(len(gateway.calls), 1)
+
+    def test_status_record_size_must_match_transferred_size(self):
+        payload = b"synthetic proof"
+        digest = hashlib.sha256(payload).hexdigest()
+        for expected_bytes in (0, -1, True, MAX_VERIFIED_PROOF_BYTES + 1):
+            with self.subTest(expected_bytes=expected_bytes):
+                with self.assertRaises(ValueError):
+                    proof_retrieve(SyntheticChunkGateway([]),
+                                   "fixture-job", digest, expected_bytes)
+        gateway = SyntheticChunkGateway(self.chunks_for(payload))
+        with self.assertRaisesRegex(RuntimeError, "differs from job record"):
+            proof_retrieve(gateway, "fixture-job", digest, len(payload) + 1)
+        self.assertEqual(len(gateway.calls), 1)
+
+    def test_conflicting_chunk_claims_fail_closed(self):
+        payload = b"synthetic proof"
+        digest = hashlib.sha256(payload).hexdigest()
+        tamper = [
+            ("job_id", "other", "different proof job"),
+            ("result_sha256", "ee" * 32, "differs from job record"),
+            ("proof_verified", False, "verified statement"),
+            ("offset", 1, "offset"),
+            ("offset", True, "offset"),
+            ("next_offset", 0, "offset"),
+            ("next_offset", True, "offset"),
+            ("complete", False, "completion marker"),
+            ("complete", 1, "completion marker"),
+            ("data_hex", "a", "malformed"),
+            ("data_hex", "gg", "malformed"),
+            ("data_hex", "", "malformed"),
+            ("data_hex", "a" * (PROOF_CHUNK_BYTES * 2 + 2), "malformed"),
+        ]
+        for key, value, message in tamper:
+            with self.subTest(field=key, value=str(value)[:40]):
+                response = self.chunks_for(payload)[0]
+                response[key] = value
+                gateway = SyntheticChunkGateway([response])
+                with self.assertRaisesRegex(RuntimeError, message):
+                    proof_retrieve(gateway, "fixture-job", digest)
+                self.assertEqual(len(gateway.calls), 1)
+
+    def test_multi_chunk_total_change_or_short_chunk_is_rejected(self):
+        payload = b"x" * PROOF_CHUNK_BYTES + b"y"
+        digest = hashlib.sha256(payload).hexdigest()
+        baseline = self.chunks_for(payload)
+        for change, reason in (
+            ({"total_bytes": len(payload) + 1}, "changed between chunks"),
+            ({"data_hex": "00"}, "size or offset"),
+            ({"complete": False}, "completion marker"),
+        ):
+            with self.subTest(change=change):
+                response = [dict(x) for x in baseline]
+                response[1].update(change)
+                gateway = SyntheticChunkGateway(response)
+                with self.assertRaisesRegex(RuntimeError, reason):
+                    proof_retrieve(gateway, "fixture-job", digest)
+                self.assertEqual(len(gateway.calls), 2)
+
+    def test_hash_mismatch_rejects_well_framed_but_changed_bytes(self):
+        payload = b"synthetic proof"
+        original = self.chunks_for(payload)[0]
+        original["data_hex"] = b"synthetic pr00f".hex()
+        server = SyntheticChunkGateway([original])
+        with self.assertRaisesRegex(RuntimeError, "reassembled proof SHA-256 mismatch"):
+            proof_retrieve(server, "fixture-job", hashlib.sha256(payload).hexdigest())
+
+    def test_retrieval_deadline_stops_before_extra_rpc(self):
+        payload = b"a"
+        gateway = SyntheticChunkGateway(self.chunks_for(payload))
+        with patch("tools.benchmark_supernode.time.monotonic",
+                   side_effect=[0, MAX_PROOF_DOWNLOAD_SECONDS + 1]):
+            with self.assertRaisesRegex(RuntimeError, "deadline"):
+                proof_retrieve(gateway, "fixture-job", hashlib.sha256(payload).hexdigest())
+        self.assertEqual(gateway.calls, [])
 
 
 class CgroupReportingTest(unittest.TestCase):
@@ -222,14 +354,17 @@ class CgroupReportingTest(unittest.TestCase):
             def response(method, params):
                 if method == "zk.proof.status":
                     return {"job": {"status": "verified_raito",
-                                    "result_sha256": digest, "error": None}}
+                                    "result_sha256": digest,
+                                    "result_bytes": len(payload), "error": None}}
                 if method == "zk.proof.receipt":
                     return {"verified_statement": {"txid": "bb" * 32}}
                 if method == "zk.proof.get":
                     return {
+                        "job_id": "fixture-job",
+                        "result_sha256": digest,
                         "proof_verified": True, "data_hex": payload.hex(),
-                        "offset": 0, "complete": True,
-                        "total_bytes": len(payload),
+                        "offset": 0, "next_offset": len(payload),
+                        "complete": True, "total_bytes": len(payload),
                     }
                 self.fail("unexpected synthetic RPC method")
 
