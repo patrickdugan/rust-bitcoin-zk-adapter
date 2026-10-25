@@ -109,16 +109,16 @@ class CgroupReportingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             producer = self.fixture(base / "producer", io_stat=(
-                "8:0 rbytes=3 wbytes=5\\n8:16 rbytes=7 wbytes=11\\n"))
+                "8:0 rbytes=3 wbytes=5\n8:16 rbytes=7 wbytes=11\n"))
             verifier = self.fixture(base / "verifier", io_stat=(
-                "8:0 rbytes=20 wbytes=22\\n"))
+                "8:0 rbytes=20 wbytes=22\n"))
 
             def advance():
                 (producer / "io.stat").write_text(
-                    "8:0 rbytes=10 wbytes=9\\n8:16 rbytes=13 wbytes=11\\n",
+                    "8:0 rbytes=10 wbytes=9\n8:16 rbytes=13 wbytes=11\n",
                     encoding="ascii")
                 (verifier / "io.stat").write_text(
-                    "8:0 rbytes=20 wbytes=42\\n", encoding="ascii")
+                    "8:0 rbytes=20 wbytes=42\n", encoding="ascii")
 
             job = self.job(select_cgroups(None, producer, verifier), advance)
             prod = job["cgroups_io_delta"]["producer"]
@@ -135,10 +135,10 @@ class CgroupReportingTest(unittest.TestCase):
     def test_io_delta_rejects_per_device_reset_despite_increasing_total(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(Path(tmp), io_stat=(
-                "8:0 rbytes=100 wbytes=10\\n8:16 rbytes=1 wbytes=0\\n"))
+                "8:0 rbytes=100 wbytes=10\n8:16 rbytes=1 wbytes=0\n"))
             before = snapshot_cgroup(root)
             (root / "io.stat").write_text(
-                "8:0 rbytes=90 wbytes=16\\n8:16 rbytes=500 wbytes=8\\n",
+                "8:0 rbytes=90 wbytes=16\n8:16 rbytes=500 wbytes=8\n",
                 encoding="ascii")
             delta = cgroup_io_delta(before, snapshot_cgroup(root))
             self.assertIsNone(delta["io_read_delta_bytes"])
@@ -147,10 +147,10 @@ class CgroupReportingTest(unittest.TestCase):
 
     def test_io_delta_refuses_device_set_churn(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.fixture(Path(tmp), io_stat="8:0 rbytes=5 wbytes=6\\n")
+            root = self.fixture(Path(tmp), io_stat="8:0 rbytes=5 wbytes=6\n")
             before = snapshot_cgroup(root)
             (root / "io.stat").write_text(
-                "8:0 rbytes=7 wbytes=8\\n8:16 rbytes=11 wbytes=12\\n",
+                "8:0 rbytes=7 wbytes=8\n8:16 rbytes=11 wbytes=12\n",
                 encoding="ascii")
             delta = cgroup_io_delta(before, snapshot_cgroup(root))
             self.assertIsNone(delta["io_read_delta_bytes"])
@@ -162,16 +162,16 @@ class CgroupReportingTest(unittest.TestCase):
             root = self.fixture(Path(tmp), io_stat=None)
             unavailable = snapshot_cgroup(root)
             (root / "io.stat").write_text(
-                "8:0 rbytes=10 wbytes=4\\n", encoding="ascii")
+                "8:0 rbytes=10 wbytes=4\n", encoding="ascii")
             delta = cgroup_io_delta(unavailable, snapshot_cgroup(root))
             self.assertIsNone(delta["io_read_delta_bytes"])
             self.assertIsNone(delta["io_write_delta_bytes"])
             self.assertIn("unavailable", delta["errors"]["io_read_delta_bytes"])
             (root / "io.stat").write_text(
-                "8:0 rbytes=invalid wbytes=4\\n", encoding="ascii")
+                "8:0 rbytes=invalid wbytes=4\n", encoding="ascii")
             bad_before = snapshot_cgroup(root)
             (root / "io.stat").write_text(
-                "8:0 rbytes=15 wbytes=14\\n", encoding="ascii")
+                "8:0 rbytes=15 wbytes=14\n", encoding="ascii")
             delta = cgroup_io_delta(bad_before, snapshot_cgroup(root))
             self.assertIsNone(delta["io_read_delta_bytes"])
             self.assertIn("before sample", delta["errors"]["io_read_delta_bytes"])
@@ -180,11 +180,11 @@ class CgroupReportingTest(unittest.TestCase):
     def test_legacy_io_delta_retains_existing_snapshots(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker = self.fixture(Path(tmp) / "worker", io_stat=(
-                "8:0 rbytes=5 wbytes=7\\n"))
+                "8:0 rbytes=5 wbytes=7\n"))
 
             def advance():
                 (worker / "io.stat").write_text(
-                    "8:0 rbytes=8 wbytes=7\\n", encoding="ascii")
+                    "8:0 rbytes=8 wbytes=7\n", encoding="ascii")
 
             job = self.job(select_cgroups(worker, None, None), advance)
             self.assertIn("cgroup_before", job)
