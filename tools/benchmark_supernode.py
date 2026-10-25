@@ -24,6 +24,8 @@ RESPONSE_CAP = 1024 * 1024
 DONE = {"verified_raito", "completed_unverified", "output_evicted", "failed", "interrupted"}
 PENDING = {"queued", "running", "verifying_raito"}
 MAX_CGROUP_COUNTER = (1 << 64) - 1
+MAX_CGROUP_METRIC_BYTES = 128
+MAX_CGROUP_IO_STAT_BYTES = 128 * 1024
 
 
 class UniqueCgroupPath(argparse.Action):
@@ -143,6 +145,28 @@ def cgroup_fs_identity(root: Path) -> dict | None:
     return {"device": metadata.st_dev, "inode": metadata.st_ino}
 
 
+
+def read_cgroup_counter_file(root: Path, filename: str, cap: int) -> str:
+    """Read bounded ASCII from a regular cgroup file without following links.
+
+    O_NONBLOCK also prevents a swapped-in FIFO from stalling the benchmark.
+    This is a Linux cgroup-v2 reader; kernel enforcement is checked elsewhere.
+    """
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(root / filename, flags)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("not a regular counter file")
+        payload = stream.read(cap + 1)
+    if len(payload) > cap:
+        raise ValueError(f"counter file exceeds {cap}-byte limit")
+    try:
+        return payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("counter file is not ASCII") from exc
+
+
+
 def snapshot_cgroup(root: Path | None) -> dict:
     """Read cgroup-v2 counters without inventing zeros for absent data.
 
@@ -165,9 +189,12 @@ def snapshot_cgroup(root: Path | None) -> dict:
                       ("memory.peak", "memory_peak_bytes"),
                       ("memory.swap.peak", "swap_peak_bytes")):
         try:
-            raw = (root / name).read_text(encoding="ascii").strip()
-        except (OSError, UnicodeError) as exc:
+            raw = read_cgroup_counter_file(root, name, MAX_CGROUP_METRIC_BYTES).strip()
+        except OSError as exc:
             errors[key] = f"{name} unavailable: {type(exc).__name__}"
+            continue
+        except ValueError as exc:
+            errors[key] = f"{name} malformed: {exc}"
             continue
         parsed = parse_cgroup_counter(raw)
         if parsed is None:
@@ -176,12 +203,13 @@ def snapshot_cgroup(root: Path | None) -> dict:
             result[key] = parsed
 
     try:
-        rows = [line.split() for line in (root / "io.stat")
-                .read_text(encoding="ascii").splitlines() if line.strip()]
-    except (OSError, UnicodeError) as exc:
+        raw_io = read_cgroup_counter_file(root, "io.stat", MAX_CGROUP_IO_STAT_BYTES)
+    except (OSError, ValueError) as exc:
+        cause = ("malformed" if isinstance(exc, ValueError) else "unavailable")
         for key in ("io_read_bytes", "io_write_bytes"):
-            errors[key] = f"io.stat unavailable: {type(exc).__name__}"
+            errors[key] = f"io.stat {cause}: {exc if cause == 'malformed' else type(exc).__name__}"
     else:
+        rows = [line.split() for line in raw_io.splitlines() if line.strip()]
         if not rows:
             for key in ("io_read_bytes", "io_write_bytes"):
                 errors[key] = "io.stat unavailable: no device rows"
