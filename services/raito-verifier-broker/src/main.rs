@@ -204,6 +204,7 @@ fn recover(root: &Path) -> Result<(), String> {
 }
 
 async fn launch_verifier(
+    stream: &mut UnixStream,
     config: &Config,
     request: &VerifyRequest,
     input: &Path,
@@ -236,10 +237,29 @@ async fn launch_verifier(
     let pid = i32::try_from(child.id().ok_or("verifier process missing PID")?)
         .map_err(|_| "verifier PID outside i32")?;
     let _group = ProcessGroup(nix::unistd::Pid::from_raw(pid));
-    let status = timeout(MAX_VERIFIER_TIME, child.wait())
-        .await
-        .map_err(|_| "Raito STARK verifier timed out".to_owned())?
-        .map_err(|e| e.to_string())?;
+    // Keep ownership of Child across client cancellation. Dropping the wait
+    // future alone kills on drop but can leave this broker's child unreaped.
+    let mut unexpected = [0u8; 1];
+    let result = tokio::select! {
+        biased;
+        _ = stream.read(&mut unexpected) => {
+            Err("gateway disconnected or sent trailing request bytes".to_owned())
+        }
+        result = timeout(MAX_VERIFIER_TIME, child.wait()) => {
+            result.map_err(|_| "Raito STARK verifier timed out".to_owned())
+                .and_then(|status| status.map_err(|e| e.to_string()))
+        }
+    };
+    // Retire the group, then reap the owned child before releasing staging
+    // and admission capacity. Keep zombies visible to acceptance checks.
+    drop(_group);
+    if result.is_err() {
+        timeout(Duration::from_secs(5), child.wait())
+            .await
+            .map_err(|_| "cancelled subprocess was not reaped within five seconds")?
+            .map_err(|e| format!("failed to reap cancelled subprocess: {e}"))?;
+    }
+    let status = result?;
     if !status.success() {
         return Err(format!("pinned Raito verifier rejected proof: {status}"));
     }
@@ -293,7 +313,7 @@ async fn validate_request(
     if sha256::Hash::from_engine(engine).to_string() != request.proof_sha256 {
         return Err("Raito compressed proof mismatched submitted SHA-256".into());
     }
-    launch_verifier(config, &request, &proof, &report).await?;
+    launch_verifier(stream, config, &request, &proof, &report).await?;
     let (_, length) = digest(&report, MAX_RECEIPT_BYTES)?;
     let mut bytes = Vec::with_capacity(length as usize);
     OpenOptions::new()
@@ -389,5 +409,105 @@ mod tests {
         receipt.block_height = 900000;
         receipt.policy_sha256 = "ab".repeat(32);
         assert!(receipt.validate(&req).is_err());
+    }
+    // Synthetic Unix IPC regression: neither EOF nor trailing bytes may leave
+    // a running worker, staging directory or occupied admission slot behind.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn disconnect_and_trailing_bytes_cancel_running_work() {
+        use tokio::io::AsyncWriteExt;
+        for trailing in [false, true] {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root =
+                env::temp_dir().join(format!("broker-disconnect-{}-{stamp}", std::process::id()));
+            fs::create_dir(&root).unwrap();
+            let staging = root.join("staging");
+            fs::create_dir(&staging).unwrap();
+            let binary = root.join("mock");
+            fs::write(
+                &binary,
+                b"#!/bin/sh\necho $$ > \"$(dirname \"$0\")/parent.pid\"\nsleep 30 &\necho $! > \"$(dirname \"$0\")/child.pid\"\nwait\n",
+            )
+            .unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            let slots = Arc::new(Semaphore::new(1));
+            let config = Arc::new(Config {
+                socket: root.join("unused.sock"),
+                staging: staging.clone(),
+                gateway_uid: nix::unistd::Uid::effective().as_raw(),
+                binary: binary.clone(),
+                binary_sha: digest(&binary, MAX_BINARY_BYTES).unwrap().0,
+                slots: slots.clone(),
+            });
+            let (mut client, incoming) = UnixStream::pair().unwrap();
+            let service = tokio::spawn(serve(incoming, config));
+            let request = VerifyRequest {
+                version: VERSION,
+                job_id: "12".repeat(32),
+                network: "main".into(),
+                expected_txid: "78".repeat(32),
+                block_hash: "34".repeat(32),
+                block_height: 900000,
+                policy_sha256: "56".repeat(32),
+                proof_sha256: sha256::Hash::hash(b"12345678").to_string(),
+                proof_bytes: 8,
+            };
+            write_header(&mut client, &request).await.unwrap();
+            client.write_all(b"12345678").await.unwrap();
+            let marker = root.join("child.pid");
+            timeout(Duration::from_secs(3), async {
+                while !fs::read_to_string(&marker).is_ok_and(|s| s.trim().parse::<u32>().is_ok()) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let pid: u32 = fs::read_to_string(marker).unwrap().trim().parse().unwrap();
+            let parent_pid: i32 = fs::read_to_string(root.join("parent.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            if trailing {
+                client.write_all(b"unexpected").await.unwrap();
+            } else {
+                drop(client);
+            }
+            timeout(Duration::from_secs(3), service)
+                .await
+                .unwrap()
+                .unwrap();
+            // waitpid must report no owned child. An exited-but-unreaped
+            // process would be returned here and make the assertion fail.
+            assert_eq!(
+                nix::sys::wait::waitpid(
+                    nix::unistd::Pid::from_raw(parent_pid),
+                    Some(nix::sys::wait::WaitPidFlag::WNOHANG)
+                ),
+                Err(nix::errno::Errno::ECHILD)
+            );
+            assert_eq!(slots.available_permits(), 1);
+            assert!(!staging.join(&request.job_id).exists());
+            timeout(Duration::from_secs(3), async {
+                loop {
+                    let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
+                    // Termination alone is insufficient: even a zombie
+                    // must disappear before this fixture reports cleanup.
+                    if stat
+                        .as_ref()
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

@@ -1,0 +1,15 @@
+Source commit: f79c4edbb3f87b8c6693b4f9565c3e163a75f519
+Source base: 23b86c701b8e0c9fbab15d23e89a26c45b4e0ac5
+Original full local patch SHA256 (not the sanitized code-only delivery patch): cf836db8ffb8e125f4e7a1784a215bb2c502a4b532737a2ad5fef3dd8647ba09
+PASS: 10 offline fixture tests, rerun on final commit; see lifecycle-fixtures.txt
+PASS: Python compile(e2e.py/lifecycle.py/test_lifecycle.py)
+PASS: rustfmt --edition 2021 --check on both broker main.rs files
+PASS: Git Bash -n run_stage2.sh (syntax only)
+PASS: git diff --cached --check before commit; clean worktree after commit
+PASS: exported patch reverse check against final index and forward check against exact base using a separate temporary index
+UNAVAILABLE: MSI host resource state (CIM access denied; sandbox process list is incomplete)
+NOT_RUN: cargo test/clippy/type checking, systemd isolation acceptance, genuine proving
+Initial offline fixture temp-directory failure was corrected by setting TEMP/TMP inside the authorized checkout. Initial text-mode patch export had CRLF conversion and failed verification; replaced with byte-exact export, then both patch checks passed.
+No publication or live host changes; Linux acceptance is pending an authorized disposable target, not denied or uncertain.
+
+Delivery qualification: source inspection established disconnect-cancellation gaps; no local runtime reproduction. The packaged code patch retains all seven code/workflow/test changes and excludes the source commit's documentation diff. The separately packaged analysis is sanitized. Existing patch-check receipts refer to the original full local patch; no further tests or experiments were run for packaging.
