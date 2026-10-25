@@ -154,6 +154,11 @@ def select_cgroups(worker: Path | None, producer: Path | None,
         if identity is None:
             raise ValueError(f"{role} cgroup directory unavailable during selection")
         identities[role] = identity
+    # A bind mount gives one cgroup directory two unrelated pathnames, so the
+    # ancestry check above cannot see it. Compare the directory objects too.
+    if ("producer" in identities
+            and identities["producer"] == identities["verifier"]):
+        raise ValueError("producer and verifier cgroups are the same directory")
     return SelectedCgroups(canonical, identities)
 
 

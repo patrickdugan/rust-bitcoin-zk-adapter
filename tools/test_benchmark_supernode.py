@@ -1109,6 +1109,22 @@ class CgroupReportingTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 select_cgroups(None, alias, prod)
 
+    def test_bind_mounted_alias_of_one_scope_is_rejected(self):
+        # A bind mount keeps device and inode while giving the directory an
+        # unrelated path; simulate it without mount privileges.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            prod = self.fixture(base / "producer")
+            ver = self.fixture(base / "elsewhere" / "verifier")
+            same = {"device": 7, "inode": 42}
+            with patch("tools.benchmark_supernode.cgroup_fs_identity",
+                       return_value=same):
+                with self.assertRaisesRegex(ValueError, "same directory"):
+                    select_cgroups(None, prod, ver)
+            # Distinct directories are still accepted.
+            self.assertEqual(set(select_cgroups(None, prod, ver)),
+                             {"producer", "verifier"})
+
     def test_cli_rejects_conflict_before_cookie_or_token_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

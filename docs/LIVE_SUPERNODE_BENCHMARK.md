@@ -40,7 +40,9 @@ proof-fetch and STARK-verifier processes. The example paths above are
 illustrative: select actual, existing service cgroup-v2 directories on the
 operator's host. The parser requires absolute directory paths, checks their
 canonical locations and rejects identical, nested or symlink-aliased
-producer/verifier paths. Supplying only one role, or combining either role
+producer/verifier paths, and two paths that name the same directory object
+(device and inode, as a bind mount does). A bind mount of a *child* of the
+other role's scope is not detected. Supplying only one role, or combining either role
 with `--worker-cgroup`, is an argument error **before credentials are read**.
 Repeating any cgroup flag, even with the same value, is also rejected
 rather than silently taking the final occurrence. Once validated, scope
