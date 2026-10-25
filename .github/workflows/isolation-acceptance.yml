@@ -37,10 +37,12 @@ jobs:
           uname -a; systemd --version | head -1; stat -fc %T /sys/fs/cgroup
           cat /sys/fs/cgroup/cgroup.controllers; nproc; free -m; swapon --show
       - name: Stage 2 - three-UID systemd deployment, probes, crash recovery
+        id: stage2
         shell: bash
         continue-on-error: true
         run: sudo env T="$GITHUB_WORKSPACE" EV="$EV" bash tools/isolation-acceptance/run_stage2.sh 2>&1 | tee stage2.log
       - name: Build pinned Raito verifier (48c237a, nightly-2025-07-14)
+        id: build_verifier
         shell: bash
         continue-on-error: true
         run: |
@@ -48,6 +50,7 @@ jobs:
           /usr/bin/time -v cargo +nightly-2025-07-14 build --release \
             --manifest-path integrations/raito/Cargo.toml 2>&1 | tail -25 | tee raito-build.log
       - name: Stage 3 - pinned verifier rejects non-proofs, directly and behind its broker
+        id: stage3
         shell: bash
         continue-on-error: true
         run: |
@@ -56,7 +59,31 @@ jobs:
             bash tools/isolation-acceptance/stage3.sh 2>&1 | tee stage3.log
       - name: Outcome annotations
         if: always()
-        run: python3 tools/isolation-acceptance/annotate.py stage2.log raito-build.log stage3.log
+        shell: bash
+        env:
+          STAGE2_OUTCOME: ${{ steps.stage2.outcome }}
+          BUILD_OUTCOME: ${{ steps.build_verifier.outcome }}
+          STAGE3_OUTCOME: ${{ steps.stage3.outcome }}
+        run: |
+          rc=0
+          python3 tools/isolation-acceptance/annotate.py stage2.log raito-build.log stage3.log || rc=1
+          # Earlier steps deliberately continue to preserve all artifacts.
+          # Their real outcomes MUST be checked here, not just log keywords.
+          for name in STAGE2_OUTCOME BUILD_OUTCOME STAGE3_OUTCOME; do
+            if [[ "${!name}" != success ]]; then
+              echo "::error title=Acceptance stage failed::${name}=${!name}"
+              rc=1
+            fi
+          done
+          if ! grep -Fq '17/17 passed' stage2.log; then
+            echo "::error title=Incomplete synthetic matrix::17/17 expected cases were not observed"
+            rc=1
+          fi
+          if ! grep -Fq 'PASS real pinned verifier (dev=false) behind third-UID broker leaves synthetic bytes unverified' stage3.log; then
+            echo "::error title=Missing verifier negative result::real pinned verifier rejection was not observed"
+            rc=1
+          fi
+          exit "$rc"
       - name: Keep sanitized evidence
         if: always()
         run: sudo chown -R "$(id -u)" "$EV" || true
