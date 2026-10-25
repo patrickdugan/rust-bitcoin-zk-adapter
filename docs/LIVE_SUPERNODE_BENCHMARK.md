@@ -97,10 +97,14 @@ Filesystem device/inode values can be reused and do not authenticate a
 service, UID, process membership or actual kernel resource limit. They
 provide an additional best-effort guard against scope recreation. The resolved cgroup paths also retain the filesystem
 identity observed during argument validation, before any RPC credentials are
-read. If an operator-selected scope is replaced before its very first job
-sample, all counters for that role become `null` with an explicit
-`changed since selection` error. The same check applies on subsequent
-jobs and to the legacy single-cgroup option.
+read. If an operator-selected scope is replaced before a job starts, the
+benchmark **refuses `zk.proof.submit`** with an explicit error instead of
+running expensive work against an ambiguous scope. This applies to every
+job and the legacy single-cgroup option. Missing individual counter files
+remain `null` with field errors and do not block an otherwise valid
+scope. If a directory changes during the job, the after-snapshot and
+derived I/O intervals remain unavailable; the reporter cannot retroactively
+stop an already submitted job.
 Each snapshot now opens the cgroup directory once and reads all counter
 files relative to that pinned directory descriptor. This prevents a
 transient rename/replacement of the path from mixing producer/verifier
