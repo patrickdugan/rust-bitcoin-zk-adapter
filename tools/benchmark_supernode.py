@@ -12,6 +12,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 from pathlib import Path
 import statistics
 import time
@@ -82,32 +83,103 @@ def percentiles(samples: list[float]) -> dict:
             "p99_ms": round(percentile(.99), 3)}
 
 
+def select_cgroups(worker: Path | None, producer: Path | None,
+                   verifier: Path | None) -> dict[str, Path]:
+    """Reject ambiguous labeling before reading credentials or sending RPCs."""
+    if worker is not None and (producer is not None or verifier is not None):
+        raise ValueError("--worker-cgroup cannot be combined with role-specific cgroups")
+    if (producer is None) != (verifier is None):
+        raise ValueError("--producer-cgroup and --verifier-cgroup must be supplied together")
+    selected = ({"worker": worker} if worker is not None else
+                {"producer": producer, "verifier": verifier}
+                if producer is not None else {})
+    canonical = {}
+    for role, path in selected.items():
+        if not path.is_absolute():
+            raise ValueError(f"{role} cgroup path must be absolute")
+        try:
+            resolved = path.resolve(strict=True)
+            if not resolved.is_dir():
+                raise ValueError(f"{role} cgroup path must be a directory")
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"{role} cgroup path is unavailable: {type(exc).__name__}") from exc
+        canonical[role] = resolved
+    if "producer" in canonical:
+        prod, ver = canonical["producer"], canonical["verifier"]
+        if prod == ver or prod in ver.parents or ver in prod.parents:
+            raise ValueError("producer and verifier cgroups must be distinct, non-overlapping paths")
+    return selected
+
+
 def snapshot_cgroup(root: Path | None) -> dict:
-    """cgroup v2 memory.peak counts cache too; it may include past jobs."""
+    """Read cgroup-v2 counters without inventing zeros for absent data.
+
+    Paths and role labels are supplied by the operator; counter files do not
+    authenticate the owning service. memory.peak may predate the job.
+    """
     if root is None:
         return {}
     if not root.is_absolute():
         raise ValueError("cgroup path must be absolute")
-    result = {}
-    for name, key in [("memory.current", "memory_current_bytes"),
+    result = {key: None for key in (
+        "memory_current_bytes", "memory_peak_bytes", "swap_peak_bytes",
+        "io_read_bytes", "io_write_bytes")}
+    errors = {}
+    for name, key in (("memory.current", "memory_current_bytes"),
                       ("memory.peak", "memory_peak_bytes"),
-                      ("memory.swap.peak", "swap_peak_bytes")]:
-        f = root / name
-        if f.is_file():
-            raw = f.read_text(encoding="ascii").strip()
-            if raw.isdecimal():
-                result[key] = int(raw)
-    io = root / "io.stat"
-    if io.is_file():
-        totals = {"rbytes": 0, "wbytes": 0}
-        for line in io.read_text(encoding="ascii").splitlines():
-            for item in line.split()[1:]:
-                if "=" in item:
-                    key, value = item.split("=", 1)
-                    if key in totals and value.isdecimal():
-                        totals[key] += int(value)
-        result["io_read_bytes"] = totals["rbytes"]
-        result["io_write_bytes"] = totals["wbytes"]
+                      ("memory.swap.peak", "swap_peak_bytes")):
+        try:
+            raw = (root / name).read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError) as exc:
+            errors[key] = f"{name} unavailable: {type(exc).__name__}"
+            continue
+        if not raw or not raw.isdecimal():
+            errors[key] = f"{name} malformed: expected non-negative integer"
+        else:
+            result[key] = int(raw)
+
+    try:
+        rows = [line.split() for line in (root / "io.stat")
+                .read_text(encoding="ascii").splitlines() if line.strip()]
+    except (OSError, UnicodeError) as exc:
+        for key in ("io_read_bytes", "io_write_bytes"):
+            errors[key] = f"io.stat unavailable: {type(exc).__name__}"
+    else:
+        if not rows:
+            for key in ("io_read_bytes", "io_write_bytes"):
+                errors[key] = "io.stat unavailable: no device rows"
+        else:
+            totals = {"rbytes": 0, "wbytes": 0}
+            fields = {"rbytes": "io_read_bytes", "wbytes": "io_write_bytes"}
+            devices = set()
+            for tokens in rows:
+                device = tokens[0]
+                if not re.fullmatch(r"[0-9]+:[0-9]+", device) or device in devices:
+                    for key in fields.values():
+                        errors[key] = "io.stat malformed: invalid or repeated device"
+                    continue
+                devices.add(device)
+                values = {}
+                malformed = False
+                for token in tokens[1:]:
+                    if "=" not in token:
+                        malformed = True
+                        break
+                    key, value = token.split("=", 1)
+                    if key in values:
+                        malformed = True
+                        break
+                    values[key] = value
+                for field, metric in fields.items():
+                    raw = values.get(field)
+                    if malformed or raw is None or not raw.isdecimal():
+                        errors[metric] = f"io.stat malformed: {field} missing or invalid on {device}"
+                    else:
+                        totals[field] += int(raw)
+            for field, metric in fields.items():
+                if metric not in errors:
+                    result[metric] = totals[field]
+    result["errors"] = errors
     return result
 
 
@@ -156,8 +228,8 @@ def measure_pair(core: RPC, gateway: RPC, height: int, samples: int) -> dict:
 
 def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
             policy: str, txid: str, memory_mib: int, deadline: float,
-            cgroup: Path | None) -> dict:
-    before = snapshot_cgroup(cgroup)
+            cgroups: dict[str, Path]) -> dict:
+    before = {role: snapshot_cgroup(path) for role, path in cgroups.items()}
     started = time.monotonic()
     response = gateway_control.call(
         "zk.proof.submit", ["raito", artifact_id, memory_mib, policy, txid])
@@ -182,9 +254,15 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
         "observed_status_transitions_seconds": seen,
         "result_sha256": record.get("result_sha256"),
         "proof_verified": status == "verified_raito",
-        "cgroup_before": before,
-        "cgroup_after": snapshot_cgroup(cgroup),
     }
+    after = {role: snapshot_cgroup(path) for role, path in cgroups.items()}
+    if "worker" in cgroups or not cgroups:
+        # Preserve the original report keys for legacy and unconfigured runs.
+        result["cgroup_before"] = before.get("worker", {})
+        result["cgroup_after"] = after.get("worker", {})
+    else:
+        result["cgroups_before"] = before
+        result["cgroups_after"] = after
     if status == "verified_raito":
         receipt = gateway_read.call("zk.proof.receipt", [job_id])
         if receipt["verified_statement"]["txid"] != txid:
@@ -207,7 +285,10 @@ def main() -> None:
     p.add_argument("--rpc-samples", type=int, default=5)
     p.add_argument("--runs", type=int, default=1)
     p.add_argument("--timeout-seconds", type=float, default=1300)
-    p.add_argument("--worker-cgroup", type=Path)
+    p.add_argument("--worker-cgroup", type=Path,
+                   help="legacy single cgroup for combined workers (exclusive with role-specific options)")
+    p.add_argument("--producer-cgroup", type=Path)
+    p.add_argument("--verifier-cgroup", type=Path)
     p.add_argument("--output", type=Path)
     args = p.parse_args()
     txid, blockhash, policy = (
@@ -217,6 +298,11 @@ def main() -> None:
             and 1 <= args.memory_mib <= 32768 and args.height >= 0
             and args.timeout_seconds > 0):
         p.error("invalid benchmark limits")
+    try:
+        cgroups = select_cgroups(args.worker_cgroup, args.producer_cgroup,
+                                 args.verifier_cgroup)
+    except ValueError as exc:
+        p.error(str(exc))
     read_token = os.environ["SUPERNODE_RPC_TOKEN"]
     control_token = os.environ["SUPERNODE_CONTROL_TOKEN"]
     cookie = args.core_cookie.read_text(encoding="utf8").strip()
@@ -239,7 +325,7 @@ def main() -> None:
     artifact_id = staged["artifact"]["id"]
     results = [
         run_job(read, control, artifact_id, policy, txid, args.memory_mib,
-                args.timeout_seconds, args.worker_cgroup)
+                args.timeout_seconds, cgroups)
         for _ in range(args.runs)
     ]
     report = {"schema": "supernode_benchmark_v1", "rpc_baseline": baseline,
@@ -247,6 +333,8 @@ def main() -> None:
                   "core_url": args.core_url, "gateway_url": args.gateway_url,
                   "height": args.height, "blockhash": blockhash,
                   "cgroup": str(args.worker_cgroup) if args.worker_cgroup else None,
+                  "cgroups": {role: str(path) for role, path in cgroups.items()},
+                  "cgroup_roles_verified": False,
                   "cgroup_memory_peak_includes_prior_usage": True,
                   "job_status_samples_are_approximate": True,
                   "live_stark_verification_observed": any(
