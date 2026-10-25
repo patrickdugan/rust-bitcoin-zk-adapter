@@ -175,6 +175,65 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertEqual(verifier_delta["io_read_delta_bytes"], 3)
             self.assertEqual(verifier_delta["io_write_delta_bytes"], 9)
 
+    def test_pinned_fd_prevents_mixed_counters_during_transient_path_swap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self.fixture(
+                base / "producer", current=111, peak=222, swap=3,
+                io_stat="8:0 rbytes=5 wbytes=7\n")
+            original_reader = read_cgroup_counter_file
+            moved = base / "renamed-original"
+            replaced = base / "temporary-replacement"
+            swapped = False
+
+            def transient_swap(path, filename, cap, *, dir_fd=None):
+                nonlocal swapped
+                if filename == "memory.peak" and not swapped:
+                    swapped = True
+                    root.rename(moved)
+                    self.fixture(root, current=900, peak=999, swap=999,
+                                 io_stat="8:0 rbytes=900 wbytes=900\n")
+                    try:
+                        return original_reader(
+                            path, filename, cap, dir_fd=dir_fd)
+                    finally:
+                        root.rename(replaced)
+                        moved.rename(root)
+                return original_reader(path, filename, cap, dir_fd=dir_fd)
+
+            with patch("tools.benchmark_supernode.read_cgroup_counter_file",
+                       side_effect=transient_swap):
+                snap = snapshot_cgroup(root)
+            self.assertTrue(swapped)
+            self.assertEqual(snap["memory_current_bytes"], 111)
+            self.assertEqual(snap["memory_peak_bytes"], 222)
+            self.assertEqual(snap["swap_peak_bytes"], 3)
+            self.assertEqual(snap["io_read_bytes"], 5)
+            self.assertEqual(snap["io_write_bytes"], 7)
+            self.assertEqual(snap["errors"], {})
+
+    def test_missing_directory_yields_explicit_unavailable_counters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = snapshot_cgroup(Path(tmp) / "missing")
+            self.assertIsNone(snap["cgroup_fs_identity"])
+            self.assertIsNone(snap["io_devices"])
+            for key in ("memory_current_bytes", "memory_peak_bytes",
+                        "swap_peak_bytes", "io_read_bytes", "io_write_bytes"):
+                self.assertIsNone(snap[key])
+                self.assertIn("directory unavailable", snap["errors"][key])
+
+    def test_snapshot_rejects_symlink_directory_even_when_target_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            actual = self.fixture(base / "actual")
+            alias = base / "symlink"
+            alias.symlink_to(actual, target_is_directory=True)
+            snap = snapshot_cgroup(alias)
+            self.assertIsNone(snap["cgroup_fs_identity"])
+            self.assertIsNone(snap["memory_current_bytes"])
+            self.assertIn("directory unavailable",
+                          snap["errors"]["memory_current_bytes"])
+
     def test_torn_snapshot_refuses_values_when_directory_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(Path(tmp), io_stat="8:0 rbytes=5 wbytes=9\n")
