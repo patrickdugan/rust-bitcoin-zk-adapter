@@ -1,0 +1,42 @@
+{
+  "schema": "raito_lifecycle_publication_v1",
+  "base_commit": "23b86c701b8e0c9fbab15d23e89a26c45b4e0ac5",
+  "preserved_original_local_commit": "f79c4edbb3f87b8c6693b4f9565c3e163a75f519",
+  "publication_branch": "fix/raito-isolation-lifecycle",
+  "publication_commit": "the commit containing this provenance; recorded by the draft PR head SHA",
+  "delivery_zip_sha256": "f92a191953e238675ebcc0e0a773f4fd42dff85063aa9b595003220575076dca",
+  "packaged_code_patch_sha256": "d370d74d0c7201975faa5deef9eac5d1bc5e94f0a2683419e9309a07fee7fdba",
+  "code_paths": [
+    ".github/workflows/isolation-acceptance.yml",
+    "services/proof-worker-broker/src/main.rs",
+    "services/raito-verifier-broker/src/main.rs",
+    "tools/isolation-acceptance/e2e.py",
+    "tools/isolation-acceptance/lifecycle.py",
+    "tools/isolation-acceptance/run_stage2.sh",
+    "tools/isolation-acceptance/test_lifecycle.py"
+  ],
+  "published_package_files": [
+    {
+      "path": "docs/evidence/raito-live-acceptance/lifecycle-repair-publication/lifecycle-repair.md",
+      "size_bytes": 9080,
+      "sha256": "c5d19c2164f89e5d8be07f455927030918b7f9a7847a02eec512e827ff6e6382"
+    },
+    {
+      "path": "docs/evidence/raito-live-acceptance/lifecycle-repair-publication/validation-summary.txt",
+      "size_bytes": 1676,
+      "sha256": "21fddac3632b49c19db110ed45462bab42ded3826218375cae57324369d20d60"
+    },
+    {
+      "path": "docs/evidence/raito-live-acceptance/lifecycle-repair-publication/receipts/lifecycle-fixtures.txt",
+      "size_bytes": 1417,
+      "sha256": "a1ae3f6df93b58228938603430cecbcc9157a9b6ecb82631345dd225daef61ea"
+    }
+  ],
+  "qualification": "Packaged evidence describes pre-publication validation and remains byte-identical. Its historical local-only/no-publication wording records that earlier stage; this provenance and the draft PR describe authorized publication. No extra engineering tests were run locally for publication.",
+  "source_inspection_findings": true,
+  "local_fixture_tests": "PASS: ten offline fixtures at original local commit; code Git objects are identical",
+  "rust_compilation_at_preparation": "NOT_RUN",
+  "systemd_acceptance_at_preparation": "NOT_RUN",
+  "genuine_proof_acceptance": "NOT_RUN",
+  "ram_preflight": "UNAVAILABLE: CIM denied; incomplete sandbox visibility; no workload interference"
+}

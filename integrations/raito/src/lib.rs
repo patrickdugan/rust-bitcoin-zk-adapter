@@ -4,6 +4,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use bincode::Options;
 use bitcoin::consensus;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::{BlockHash, MerkleBlock, Transaction, Txid};
 use bzip2::read::BzDecoder;
 use raito_spv_verify::{verify_proof, CompressedSpvProof, VerifierConfig};
@@ -26,6 +27,7 @@ pub struct RaitoCheckedTransaction {
     proven_tip_height: u32,
     tx_index: u32,
     candidates: Vec<Candidate>,
+    proof_sha256: String,
 }
 
 impl RaitoCheckedTransaction {
@@ -50,37 +52,50 @@ impl RaitoCheckedTransaction {
     pub fn candidates(&self) -> &[Candidate] {
         &self.candidates
     }
+    /// SHA-256 of the exact compressed bytes decoded and STARK-verified.
+    pub fn proof_sha256(&self) -> &str {
+        &self.proof_sha256
+    }
 }
 
 /// Bounded bzip2/bincode decoder for the upstream Raito proof format.
-fn load_bounded_proof(path: &Path) -> Result<CompressedSpvProof> {
-    let length = fs::metadata(path)
-        .with_context(|| format!("proof path {} could not be inspected", path.display()))?
-        .len();
+fn load_bounded_proof(path: &Path) -> Result<(CompressedSpvProof, String)> {
+    let meta = fs::symlink_metadata(path)
+        .with_context(|| format!("proof path {} could not be inspected", path.display()))?;
+    ensure!(meta.file_type().is_file(), "proof must be a regular file");
     ensure!(
-        length <= MAX_COMPRESSED_BYTES,
+        meta.len() <= MAX_COMPRESSED_BYTES,
         "compressed proof exceeds limit"
     );
 
+    // Hash the same compressed byte buffer that is decompressed and verified.
+    // This prevents proof-file replacement between separate hashing and parsing.
+    let mut compressed = Vec::with_capacity(meta.len() as usize);
+    File::open(path)?
+        .take(MAX_COMPRESSED_BYTES + 1)
+        .read_to_end(&mut compressed)?;
+    ensure!(
+        compressed.len() as u64 <= MAX_COMPRESSED_BYTES,
+        "compressed proof exceeds limit"
+    );
+    let digest = sha256::Hash::hash(&compressed).to_string();
+
     let mut decoded = Vec::new();
-    let file = File::open(path)?;
-    BzDecoder::new(file)
+    BzDecoder::new(&compressed[..])
         .take(MAX_DECOMPRESSED_BYTES + 1)
         .read_to_end(&mut decoded)?;
     ensure!(
         decoded.len() as u64 <= MAX_DECOMPRESSED_BYTES,
         "decompressed proof exceeds limit"
     );
-
-    // Raito serializes with bincode::serialize, which uses fixed-width
-    // little-endian integers. The explicit bound rejects excessive input.
     let options = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_limit(MAX_DECOMPRESSED_BYTES)
         .reject_trailing_bytes();
-    options
+    let proof = options
         .deserialize(&decoded)
-        .context("malformed Raito compressed SPV proof")
+        .context("malformed Raito compressed SPV proof")?;
+    Ok((proof, digest))
 }
 
 /// Full Raito STARK+MMR+transaction verification in non-development mode.
@@ -93,7 +108,7 @@ pub async fn verify_raito_proof(
     min_proven_height: u32,
     config: &VerifierConfig,
 ) -> Result<RaitoCheckedTransaction> {
-    let proof = load_bounded_proof(path)?;
+    let (proof, proof_sha256) = load_bounded_proof(path)?;
     let found_txid = proof.transaction.compute_txid();
     ensure!(
         found_txid == expected_txid,
@@ -144,5 +159,6 @@ pub async fn verify_raito_proof(
         proven_tip_height: tip_height,
         tx_index,
         candidates,
+        proof_sha256,
     })
 }

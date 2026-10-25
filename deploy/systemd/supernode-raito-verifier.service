@@ -1,0 +1,42 @@
+# Sample deployment only. The pinned Raito binary must be root-owned,
+# immutable to the verifier UID, and remain outside writable staging.
+# Provision a hard quota/bounded filesystem for verifier staging separately.
+[Unit]
+Description=Bitcoin Supernode isolated Raito Cairo/STWO verifier
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=supernode-verify
+Group=supernode-ipc
+EnvironmentFile=/etc/supernode/verifier.env
+ExecStart=/opt/supernode/bin/supernode-raito-verifier-broker
+RuntimeDirectory=supernode-verify/socket
+RuntimeDirectoryMode=0770
+StateDirectory=supernode-verify/staging
+StateDirectoryMode=0700
+UMask=0007
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=4G
+MemorySwapMax=0
+TasksMax=64
+KillMode=control-group
+TimeoutStopSec=10s
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

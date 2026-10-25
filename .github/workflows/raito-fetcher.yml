@@ -1,0 +1,23 @@
+name: Raito fetch worker
+on:
+  push:
+    paths:
+      - 'integrations/raito-fetcher/**'
+      - '.github/workflows/raito-fetcher.yml'
+  pull_request:
+    paths:
+      - 'integrations/raito-fetcher/**'
+      - '.github/workflows/raito-fetcher.yml'
+  workflow_dispatch:
+jobs:
+  test-fetcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --manifest-path integrations/raito-fetcher/Cargo.toml -- --check
+      - run: cargo test --manifest-path integrations/raito-fetcher/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path integrations/raito-fetcher/Cargo.toml --all-targets -- -D warnings

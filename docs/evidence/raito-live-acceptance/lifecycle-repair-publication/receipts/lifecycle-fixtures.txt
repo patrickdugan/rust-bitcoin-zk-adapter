@@ -1,0 +1,15 @@
+test_crash_requires_phase_and_real_worker_membership (test_lifecycle.LifecycleFixtures.test_crash_requires_phase_and_real_worker_membership) ... ok
+test_only_running_service_with_exact_main_is_settled (test_lifecycle.LifecycleFixtures.test_only_running_service_with_exact_main_is_settled) ... ok
+test_parse_stat_with_spaces_and_parentheses (test_lifecycle.LifecycleFixtures.test_parse_stat_with_spaces_and_parentheses) ... ok
+test_pid_reuse_is_not_a_survivor (test_lifecycle.LifecycleFixtures.test_pid_reuse_is_not_a_survivor) ... ok
+test_process_is_tracked_after_leaving_cgroup (test_lifecycle.LifecycleFixtures.test_process_is_tracked_after_leaving_cgroup) ... ok
+test_shell_containing_sleep_is_not_a_worker (test_lifecycle.LifecycleFixtures.test_shell_containing_sleep_is_not_a_worker) ... ok
+test_timeout_fails_instead_of_treating_missing_data_as_zero (test_lifecycle.LifecycleFixtures.test_timeout_fails_instead_of_treating_missing_data_as_zero) ... ok
+test_unreadable_proc_is_not_absence (test_lifecycle.LifecycleFixtures.test_unreadable_proc_is_not_absence) ... ok
+test_wait_observes_terminal_transition (test_lifecycle.LifecycleFixtures.test_wait_observes_terminal_transition) ... ok
+test_zombie_retained_as_terminal_evidence (test_lifecycle.LifecycleFixtures.test_zombie_retained_as_terminal_evidence) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.017s
+
+OK

@@ -12,8 +12,10 @@ anyhow = "1"
 bitcoin = "=0.32.102"
 bincode = "1.3"
 bzip2 = "0.4"
+serde_json = "1"
 # Raito pins nightly-2025-07-14; later ruint uses newer const APIs.
 ruint = "=1.17.0"
 raito-spv-verify = { git = "https://github.com/starkware-bitcoin/raito", rev = "48c237ac941d8061a857ecd111d7e81107912556" }
 rust-bitcoin-zk-adapter = { path = "../.." }
+supernode-cgroup-guard = { path = "../worker-cgroup-guard" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
