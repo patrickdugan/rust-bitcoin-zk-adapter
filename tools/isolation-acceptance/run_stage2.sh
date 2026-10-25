@@ -1,12 +1,13 @@
 #!/bin/bash
 # Stage 2 runner: setup -> probes -> harness (synthetic) -> e2e/crash -> logs -> teardown.
-set -u
+set -uo pipefail
+result=0
 K="${K:-$(cd "$(dirname "$0")" && pwd)}"
 T="${T:?set T to the repository checkout with built services}"
 E="${EV:-/root/rbzk-evidence}/stage2"; rm -rf $E; mkdir -p $E
 export K T; [ -n "${EV:-}" ] && export EV
 echo "stage2 start $(date -u +%FT%TZ)"; uname -r; systemd --version | head -1
-bash $K/setup.sh 2>&1 | tee $E/setup.log
+bash $K/setup.sh 2>&1 | tee $E/setup.log || { echo "FAIL setup did not complete"; exit 1; }
 echo; bash $K/probes.sh 2>&1 | tee $E/probes.log
 echo; echo "== benchmark harness against the synthetic deployment (dual cgroups)"
 BH=$(python3 -c 'import hashlib;print(hashlib.sha256(b"rbzk-synthetic-900000").hexdigest())')
@@ -36,7 +37,7 @@ print("live_stark_verification_observed =", r["environment"]["live_stark_verific
       "(synthetic verifier: this flag cannot distinguish a mock)")
 PY
 echo; echo "== e2e and crash recovery (synthetic)"
-EV="${EV:-/root/rbzk-evidence}" python3 $K/e2e.py 2>&1 | tee $E/e2e.log
+EV="${EV:-/root/rbzk-evidence}" python3 $K/e2e.py 2>&1 | tee $E/e2e.log || { echo "FAIL e2e did not pass"; result=1; }
 for u in supernode-gateway supernode-proof-worker-broker supernode-raito-verifier rbzk-mockcore; do
   journalctl -u $u --since "-30min" --no-pager -o short-iso > $E/journal-$u.log 2>&1
 done
@@ -46,3 +47,4 @@ grep -r -F "$(cat /root/rbzk-secrets/control)" $E && echo "LEAK control token" |
 bash $K/teardown.sh
 userdel rbzk-intruder 2>/dev/null
 echo "stage2 end $(date -u +%FT%TZ)"
+exit "$result"

@@ -12,7 +12,11 @@ case "$mode" in
   reject) echo "synthetic verifier rejects" >&2; exit 3;;
   wrongtxid) txid=0000000000000000000000000000000000000000000000000000000000000000;;
   forgedproof) digest=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;;
-  detach) setsid sleep 902 </dev/null >/dev/null 2>&1 & ;;
+  detach)
+    # Popen waits for successful exec after setsid; backgrounding the
+    # setsid command itself races the broker's process-group cleanup.
+    python3 -c 'import subprocess; subprocess.Popen(["sleep", "902"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)'
+    ;;
   tamper)
     for f in /var/lib/supernode-gateway/jobs/*.json; do
       if (printf '%s' forged > "$f") 2>/dev/null; then echo "TAMPER-SUCCEEDED $f" >&2; exit 33; fi

@@ -1,0 +1,17 @@
+{
+  "scope": "pre-commit bounded local validation of correction; exact committed source recorded by PR head",
+  "prior_head": "06d15a3f09319a9f0adbd6e358d17c72c86b33b7",
+  "offline_lifecycle_fixtures": {
+    "outcome": "PASS",
+    "count": 12,
+    "command": "python -m unittest discover -s tools/isolation-acceptance -p test_lifecycle.py -v",
+    "scope": "mocked service/proc fixtures; no host services or child signal tests"
+  },
+  "python_syntax": "PASS",
+  "rustfmt": "PASS",
+  "mock_shell_syntax": "PASS: Bash -n only",
+  "rust_compilation_and_linux_regressions": "NOT_RUN locally; await automatic exact-source CI",
+  "systemd_acceptance": "NOT_RUN locally; await automatic exact-source CI",
+  "genuine_proof": "NOT_RUN",
+  "user_workloads": "untouched; no heavy local builds"
+}

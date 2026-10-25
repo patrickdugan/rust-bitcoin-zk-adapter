@@ -21,7 +21,9 @@ case "$mode" in
     done
     echo "tamper attempts denied" >&2;;
   detach)
-    setsid sleep 901 </dev/null >/dev/null 2>&1 &
+    # Popen waits for successful exec after setsid; backgrounding the
+    # setsid command itself races the broker's process-group cleanup.
+    python3 -c 'import subprocess; subprocess.Popen(["sleep", "901"], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)'
     ;;
   fill)
     dd if=/dev/zero of="$output" bs=1M count=100 2>/dev/null

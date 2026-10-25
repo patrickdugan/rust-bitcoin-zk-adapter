@@ -10,10 +10,11 @@ are not cryptographic acceptance.
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.request import Request, build_opener, ProxyHandler
+from lifecycle import Observation, command, is_sleep, in_unit, detached_ready, crash_precondition
 
 SECRETS = "/root/rbzk-secrets"
 READ = open(f"{SECRETS}/read").read().strip()
@@ -43,10 +44,6 @@ def rpc(method, params, token=READ):
     if reply.get("error"):
         return None, reply["error"].get("message", str(reply["error"]))
     return reply.get("result"), None
-
-
-def sh(cmd):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
 
 
 def mode(fetch=None, verify=None):
@@ -115,12 +112,9 @@ def retrieve(job_id):
                     "proof_verified_flag": res["proof_verified"]}, None
 
 
-def procs(unit):
-    return sh(f"cat /sys/fs/cgroup/system.slice/{unit}.service/cgroup.procs 2>/dev/null | wc -l")
-
-
 def jobfile_digests():
-    return sh("sha256sum /var/lib/supernode-gateway/jobs/*.json 2>/dev/null | sort")
+    return "\n".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p}"
+                     for p in sorted(Path("/var/lib/supernode-gateway/jobs").glob("*.json")))
 
 
 def main():
@@ -197,45 +191,92 @@ def main():
     mode("fill", "ok")
     jid, _ = submit()
     job, seen = wait_for(jid, {"verified_raito", "completed_unverified", "failed"})
-    left = sh("ls -A /var/lib/supernode-worker/staging | grep -v lost+found | wc -l")
+    left = sum(p.name != "lost+found" for p in Path("/var/lib/supernode-worker/staging").iterdir())
     mode("ok", "ok")
     jid2, _ = submit()
     job2, _ = wait_for(jid2, {"verified_raito", "completed_unverified", "failed"})
     record("staging exhaustion fails the job, leaves no staging files, broker recovers",
-           job.get("status") == "failed" and left == "0" and job2.get("status") == "verified_raito",
+           job.get("status") == "failed" and left == 0 and job2.get("status") == "verified_raito",
            f"{seen} error={job.get('error')!r} leftover_entries={left} next={job2.get('status')}")
 
-    # 8. Detached (setsid) descendants of producer and verifier.
-    for unit, m, marker in (("supernode-proof-worker-broker", ("detach", "ok"), "sleep 901"),
-                            ("supernode-raito-verifier", ("ok", "detach"), "sleep 902")):
+    # 8. Detached descendants may outlive a job's process group, but must
+    # disappear on a completed service stop. Restart only after recording it.
+    evidence_dir = os.path.join(os.environ.get("EV", "/root/rbzk-evidence"), "stage2")
+    for unit, m, seconds in (("supernode-proof-worker-broker", ("detach", "ok"), 901),
+                              ("supernode-raito-verifier", ("ok", "detach"), 902)):
+        obs = Observation()
+        baseline, _ = obs.clean()
+        assert baseline, "services not idle before detached-child case"
         mode(*m)
-        jid, _ = submit()
-        wait_for(jid, {"verified_raito", "completed_unverified", "failed"})
-        time.sleep(1)
-        survived = sh(f"pgrep -c -f '{marker}'")
-        sh(f"systemctl restart {unit}")
-        time.sleep(2)
-        after = sh(f"pgrep -c -f '{marker}'")
-        record(f"{unit}: setsid escapee after job / after unit restart", after == "0",
-               f"alive_after_job={survived} alive_after_restart={after}")
+        jid, err = submit()
+        job, seen = wait_for(jid, {"verified_raito", "completed_unverified", "failed"})
+        observed, before = obs.wait("after-job-before-stop", lambda e: any(
+            p["observed_unit"] == unit and detached_ready(p, seconds, unit)
+            for p in e["remaining"]), timeout=5)
+        detached = [p for p in before["remaining"] if p["observed_unit"] == unit
+                    and detached_ready(p, seconds, unit)]
+        obs.save(os.path.join(evidence_dir, f"detach-{seconds}.json"))
+        command("systemctl", "stop", unit)
+        stopped, stop_event = obs.wait("service-stopped", lambda e:
+            e["services"][unit]["properties"]["ActiveState"] == "inactive"
+            and e["services"][unit]["properties"]["MainPID"] == "0"
+            and not e["services"][unit]["processes"]
+            and not any(p["observed_unit"] == unit for p in e["remaining"]))
         mode("ok", "ok")
-        wait_gateway()
+        command("systemctl", "start", unit)
+        # Explicit broker stop propagates through the gateway Requires=.
+        command("systemctl", "start", "supernode-gateway")
+        clean, _ = obs.clean()
+        obs.save(os.path.join(evidence_dir, f"detach-{seconds}.json"))
+        record(f"{unit}: setsid escapee after job / after unit restart",
+               baseline and not err and job.get("status") == "verified_raito"
+               and observed and bool(detached) and stopped and clean,
+               f"transitions={seen} exact_detached={detached} stopped={stopped} clean={clean}")
+        assert stopped and clean, "stop/restart cleanup failed; refusing to contaminate later cases"
+        assert wait_gateway(), "gateway unavailable after broker restart"
 
-    # 9. SIGKILL during each lifecycle phase.
+    # 9. Require both the gateway phase and an actual sleeping subprocess in
+    # the correct service cgroup before sending SIGKILL. Never kill on timeout.
     def crash(label, fmode, vmode, phase, unit, expect):
+        obs = Observation()
+        baseline, _ = obs.clean()
+        assert baseline, "services not idle before crash case"
         mode(fmode, vmode)
         jid, err = submit()
-        job, seen = wait_for(jid, {phase}, timeout=20)
-        sh(f"systemctl kill -s SIGKILL --kill-whom=main {unit}")
-        time.sleep(5)
-        wait_gateway(40)
+        job, seen = wait_for(jid, {phase, "failed", "completed_unverified", "verified_raito"}, timeout=20)
+        worker_unit = "supernode-proof-worker-broker" if phase == "running" else "supernode-raito-verifier"
+        ready, before = obs.wait("before-SIGKILL", lambda e: any(
+            is_sleep(p, 30) and in_unit(p, worker_unit)
+            for p in e["services"][worker_unit]["processes"]), timeout=5)
+        current, status_err = status(jid)
+        precondition = ready and crash_precondition(job, current, phase, err, status_err, before, worker_unit)
+        if not precondition:
+            mode("ok", "ok")
+            obs.save(os.path.join(evidence_dir, f"crash-{unit}-{phase}.json"))
+            record(label, False, f"SIGKILL NOT RUN: precondition failed; transitions={seen} error={job.get('error')!r}")
+            raise RuntimeError("crash precondition failed; later cases would be contaminated")
+        prior = before["services"][unit]["properties"]
+        obs.save(os.path.join(evidence_dir, f"crash-{unit}-{phase}.json"))
+        signal_time = time.monotonic()
+        command("systemctl", "kill", "-s", "SIGKILL", "--kill-whom=main", unit)
+        restarted, _ = obs.wait("automatic-restart", lambda e:
+            e["services"][unit]["properties"]["ActiveState"] == "active"
+            and e["services"][unit]["properties"]["SubState"] == "running"
+            and e["services"][unit]["properties"]["InvocationID"] != prior["InvocationID"]
+            and int(e["services"][unit]["properties"]["MainPID"]) > 0, timeout=40)
+        gateway_ready = wait_gateway(40)
         job2, seen2 = wait_for(jid, expect | {"failed"}, timeout=60)
-        extra = {u: procs(u) for u in ("supernode-proof-worker-broker", "supernode-raito-verifier")}
-        stray = sh("pgrep -c -f 'sleep 30'")
+        clean, final = obs.clean()
+        # A broken cleanup must not pass merely because the 30-second mock
+        # finished naturally while recovery polling was in progress.
+        cleanup_seconds = time.monotonic() - signal_time
+        within_bound = cleanup_seconds < 25
         mode("ok", "ok")
-        record(label, job2.get("status") in expect and stray == "0",
-               f"phase_seen={seen[-1] if seen else None} -> {seen2} error={job2.get('error')!r} "
-               f"cgroup_procs={extra} stray_sleepers={stray} active={sh(f'systemctl is-active {unit}')}")
+        obs.save(os.path.join(evidence_dir, f"crash-{unit}-{phase}.json"))
+        record(label, restarted and gateway_ready and job2.get("status") in expect and clean and within_bound,
+               f"phase_seen={phase} -> {seen2} error={job2.get('error')!r} "
+               f"restarted={restarted} clean={clean} cleanup_seconds={cleanup_seconds:.3f} remaining={final['remaining']}")
+        assert clean and within_bound, "lifecycle cleanup failed; refusing to contaminate later cases"
         return jid, job2
 
     crash("SIGKILL gateway while producer runs -> interrupted after restart",
@@ -253,7 +294,7 @@ def main():
                      {"completed_unverified", "interrupted"})
 
     # 10. Persisted state survives a clean gateway restart.
-    sh("systemctl restart supernode-gateway"); wait_gateway()
+    command("systemctl", "restart", "supernode-gateway"); assert wait_gateway()
     rec, rerr = rpc("zk.proof.receipt", [good_job])
     record("verified receipt survives gateway restart (re-validated)", rerr is None, f"err={rerr!r}")
 
@@ -266,4 +307,16 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        main()
+    except Exception as exc:
+        # Leave a machine-readable failed result even when setup/preconditions
+        # fail. Exception text is bounded and contains no RPC credentials.
+        record("harness completed", False, type(exc).__name__)
+        raise
+    finally:
+        out = {"schema": "rbzk_stage2_synthetic_v1", "results": RESULTS,
+               "note": "Synthetic only; not cryptographic acceptance."}
+        with open(os.path.join(os.environ.get("EV", "/root/rbzk-evidence"), "stage2", "e2e.json"), "w") as f:
+            json.dump(out, f, indent=2)
+    sys.exit(0 if RESULTS and all(r["outcome"] == "PASS" for r in RESULTS) else 1)

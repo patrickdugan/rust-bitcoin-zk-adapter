@@ -25,6 +25,8 @@ jobs:
       # The runner context is unavailable in job-level env.
       - run: echo "EV=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Offline lifecycle evidence fixtures
+        run: python3 -m unittest discover -s tools/isolation-acceptance -p test_lifecycle.py -v
       - name: Build gateway and brokers
         run: |
           for m in services/supernode-rpc services/proof-worker-broker services/raito-verifier-broker; do
@@ -35,15 +37,18 @@ jobs:
           uname -a; systemd --version | head -1; stat -fc %T /sys/fs/cgroup
           cat /sys/fs/cgroup/cgroup.controllers; nproc; free -m; swapon --show
       - name: Stage 2 - three-UID systemd deployment, probes, crash recovery
+        shell: bash
         continue-on-error: true
         run: sudo env T="$GITHUB_WORKSPACE" EV="$EV" bash tools/isolation-acceptance/run_stage2.sh 2>&1 | tee stage2.log
       - name: Build pinned Raito verifier (48c237a, nightly-2025-07-14)
+        shell: bash
         continue-on-error: true
         run: |
           rustup toolchain install nightly-2025-07-14 --profile minimal
           /usr/bin/time -v cargo +nightly-2025-07-14 build --release \
             --manifest-path integrations/raito/Cargo.toml 2>&1 | tail -25 | tee raito-build.log
       - name: Stage 3 - pinned verifier rejects non-proofs, directly and behind its broker
+        shell: bash
         continue-on-error: true
         run: |
           sudo env T="$GITHUB_WORKSPACE" EV="$EV" \
