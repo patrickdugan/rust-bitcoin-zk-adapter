@@ -28,18 +28,58 @@ python3 tools/benchmark_supernode.py \
   --memory-mib 2048 \
   --rpc-samples 10 \
   --runs 1 \
-  --worker-cgroup /sys/fs/cgroup/raito-workers \
+  --producer-cgroup /sys/fs/cgroup/supernode-fetch.service \
+  --verifier-cgroup /sys/fs/cgroup/supernode-verify.service \
   --output supernode-live-benchmark.json
 ```
 
-`--worker-cgroup` is optional and should refer to the cgroup enclosing
-the relevant prover, verifier and their subprocesses. The report records
-`memory.peak`, `memory.current`, and cumulative `io.stat` counters where
-available. The cgroup memory high-water mark may include page cache and
-previous runs; reset counters or allocate a fresh cgroup for per-run peaks.
-IO totals require subtracting the before counters from the after counters.
+## Cgroup selection and report format
+
+Use `--producer-cgroup PATH --verifier-cgroup PATH` **together** for separate
+proof-fetch and STARK-verifier processes. The example paths above are
+illustrative: select actual, existing service cgroup-v2 directories on the
+operator's host. The parser requires absolute directory paths, checks their
+canonical locations and rejects identical, nested or symlink-aliased
+producer/verifier paths. Supplying only one role, or combining either role
+with `--worker-cgroup`, is an argument error **before credentials are read**.
+
+`--worker-cgroup PATH` remains the **legacy single-cgroup option** for an
+operator-confirmed scope that encloses all workers to be measured. It keeps
+per-job `cgroup_before`/`cgroup_after` and `environment.cgroup` keys
+for existing consumers. Without any cgroup options those legacy per-job
+fields remain empty objects. In separate-role mode each job instead has
+`cgroups_before.producer`, `cgroups_after.producer`,
+`cgroups_before.verifier`, `cgroups_after.verifier`, and the environment
+contains `cgroups.producer` and `cgroups.verifier`. The legacy
+`environment.cgroup` is `null` in separate-role mode; there is no
+fabricated combined measurement. An additional `environment.cgroup_roles_verified`
+field remains `false`: this script never authenticates service membership.
+
+Each selected scope reports `memory_current_bytes`, `memory_peak_bytes`,
+`swap_peak_bytes`, `io_read_bytes` and `io_write_bytes` from its own
+files. Missing, unreadable, empty or malformed counters are `null` with
+a description under the scope's `errors` map. A genuine counter value of
+zero remains numeric zero. `io.stat` sums per-device `rbytes` and `wbytes`
+only when the respective fields are present and valid on every listed device.
+An absent `memory.swap.peak` on some kernels is reported as unavailable.
+Snapshots are taken before submission and after completion, with cumulative
+I/O totals requiring subtraction to obtain an interval delta.
+
+**Operator prerequisite:** verify role-to-cgroup ownership through systemd
+unit identity and actual process membership (such as `ControlGroup`,
+`cgroup.procs` and `/proc/<pid>/cgroup`) before interpreting producer and
+verifier labels. Counter numbers and path names do not establish ownership;
+swapping the two paths simply swaps the reported labels. Confirm relevant
+descendants are inside the scope. Neither this reporting change nor a
+cgroup read establishes that memory, swap, PID or disk limits were enforced.
+
+The cgroup `memory.peak` high-water mark can include page cache and previous
+runs; reset counters or allocate a fresh scope for per-run peaks.
 Polling job status every 250 milliseconds gives approximate stage timings.
-Separate cgroups are recommended to isolate peak RSS and IO by process.
+
+For the existing legacy invocation, replace the two role-specific arguments
+in the command above with `--worker-cgroup /sys/fs/cgroup/raito-workers`
+after confirming that scope actually includes both service roles.
 
 Output contains p50/p95/p99 RPC latency in milliseconds, per-job wall time,
 observed state transitions, retrieved proof byte counts, and verification
