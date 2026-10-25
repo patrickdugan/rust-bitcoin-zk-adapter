@@ -1,5 +1,6 @@
 """Unit checks for bounded Supernode benchmark helpers."""
 import contextlib
+import copy
 import hashlib
 import io
 import os
@@ -12,8 +13,10 @@ from unittest.mock import Mock, patch
 from tools.benchmark_supernode import (
     cgroup_io_delta, main, loopback_url, percentiles, proof_retrieve,
     require_hash, run_job, select_cgroups, snapshot_cgroup, parse_cgroup_counter,
-    read_cgroup_counter_file, MAX_CGROUP_IO_STAT_BYTES, MAX_CGROUP_METRIC_BYTES,
-    MAX_VERIFIED_PROOF_BYTES, PROOF_CHUNK_BYTES, MAX_PROOF_DOWNLOAD_SECONDS,
+    read_cgroup_counter_file, validate_raito_receipt, RAITO_STATEMENT,
+    RAITO_VERIFIER, MAX_RAITO_HEIGHT, MAX_CGROUP_IO_STAT_BYTES,
+    MAX_CGROUP_METRIC_BYTES, MAX_VERIFIED_PROOF_BYTES,
+    PROOF_CHUNK_BYTES, MAX_PROOF_DOWNLOAD_SECONDS,
 )
 
 
@@ -62,6 +65,122 @@ class FakeRead:
             "error": "fixture only",
             "result_sha256": None,
         }}
+
+
+def synthetic_receipt(proof_sha: str, *,
+                      txid: str = "bb" * 32,
+                      block_hash: str = "cc" * 32,
+                      block_height: int = 42,
+                      policy_sha: str = "aa" * 32) -> dict:
+    """Gateway-shaped synthetic receipt. Never evidence of a real STARK."""
+    return {
+        "job_id": "fixture-job",
+        "proof_verified": True,
+        "active_chain_at_lookup": True,
+        "output_retained": True,
+        "result_sha256": proof_sha,
+        "verified_statement": {
+            "statement": RAITO_STATEMENT,
+            "verifier": RAITO_VERIFIER,
+            "txid": txid,
+            "block_hash": block_hash,
+            "block_height": block_height,
+            "proven_tip_height": block_height + 1,
+            "tx_index": 0,
+            "proof_sha256": proof_sha,
+            "policy_sha256": policy_sha,
+        },
+    }
+
+
+class RaitoReceiptBindingTest(unittest.TestCase):
+    @staticmethod
+    def checked(reply: dict) -> dict:
+        return validate_raito_receipt(
+            reply, "fixture-job", "bb" * 32, "cc" * 32, 42,
+            "aa" * 32, "11" * 32
+        )
+
+    def test_synthetic_fully_bound_receipt_is_accepted_as_schema_only(self):
+        expected = synthetic_receipt("11" * 32)
+        self.assertEqual(self.checked(expected), expected["verified_statement"])
+
+    def test_receipt_must_bind_pinned_statement_and_block_policy_proof(self):
+        baseline = synthetic_receipt("11" * 32)
+        mutations = {
+            "statement": "other_statement",
+            "verifier": "untrusted-verifier",
+            "txid": "ee" * 32,
+            "block_hash": "ee" * 32,
+            "block_height": 43,
+            "proven_tip_height": 41,
+            "tx_index": True,
+            "proof_sha256": "ee" * 32,
+            "policy_sha256": "ee" * 32,
+        }
+        for field, replacement in mutations.items():
+            with self.subTest(field=field):
+                changed = copy.deepcopy(baseline)
+                changed["verified_statement"][field] = replacement
+                with self.assertRaises(ValueError):
+                    self.checked(changed)
+
+    def test_gateway_receipt_origin_chain_and_output_claims_required(self):
+        baseline = synthetic_receipt("11" * 32)
+        for key, value in (
+            ("job_id", "other-job"),
+            ("proof_verified", False),
+            ("active_chain_at_lookup", False),
+            ("output_retained", False),
+            ("result_sha256", "ee" * 32),
+        ):
+            with self.subTest(key=key):
+                changed = copy.deepcopy(baseline)
+                changed[key] = value
+                with self.assertRaises(ValueError):
+                    self.checked(changed)
+
+    def test_unknown_or_missing_typed_fields_rejected(self):
+        baseline = synthetic_receipt("11" * 32)
+        for field in ("statement", "verifier", "txid", "block_hash",
+                      "block_height", "proven_tip_height", "tx_index",
+                      "proof_sha256", "policy_sha256"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(baseline)
+                del changed["verified_statement"][field]
+                with self.assertRaises(ValueError):
+                    self.checked(changed)
+        changed = copy.deepcopy(baseline)
+        changed["verified_statement"]["extra_claim"] = "injected"
+        with self.assertRaises(ValueError):
+            self.checked(changed)
+
+    def test_noninteger_and_out_of_range_tip_height_and_index_rejected(self):
+        baseline = synthetic_receipt("11" * 32)
+        for field, value in (
+            ("block_height", True),
+            ("proven_tip_height", True),
+            ("proven_tip_height", MAX_RAITO_HEIGHT + 1),
+            ("tx_index", -1),
+            ("tx_index", MAX_RAITO_HEIGHT + 1),
+        ):
+            with self.subTest(field=field, value=value):
+                changed = copy.deepcopy(baseline)
+                changed["verified_statement"][field] = value
+                with self.assertRaises(ValueError):
+                    self.checked(changed)
+
+    def test_missing_explicit_block_context_fails_closed(self):
+        baseline = synthetic_receipt("11" * 32)
+        for block_hash, height in ((None, 42), ("cc" * 32, None),
+                                   ("cc" * 32, True),
+                                   ("cc" * 32, MAX_RAITO_HEIGHT + 1)):
+            with self.subTest(block_hash=block_hash, height=height):
+                with self.assertRaises(ValueError):
+                    validate_raito_receipt(
+                        baseline, "fixture-job", "bb" * 32,
+                        block_hash, height, "aa" * 32, "11" * 32
+                    )
 
 
 class SyntheticChunkGateway:
@@ -307,12 +426,13 @@ class CgroupReportingTest(unittest.TestCase):
                     return {"job": {"status": "verified_raito",
                                     "result_sha256": "11" * 32, "error": None}}
                 if method == "zk.proof.receipt":
-                    return {"verified_statement": {"txid": "cc" * 32}}
+                    return synthetic_receipt("11" * 32, txid="dd" * 32)
                 self.fail("proof retrieval started after mismatched receipt")
 
             read.call.side_effect = response
             result = run_job(read, FakeControl(), "synthetic-artifact",
-                             "aa" * 32, "bb" * 32, 1, 1, cgroups)
+                             "aa" * 32, "bb" * 32, 1, 1, cgroups,
+                             block_hash="cc" * 32, block_height=42)
             self.assertEqual(result["status"], "verified_raito")
             self.assertTrue(result["observation_complete"])
             self.assertFalse(result["proof_verified"])
@@ -330,14 +450,15 @@ class CgroupReportingTest(unittest.TestCase):
                     return {"job": {"status": "verified_raito",
                                     "result_sha256": "11" * 32, "error": None}}
                 if method == "zk.proof.receipt":
-                    return {"verified_statement": {"txid": "bb" * 32}}
+                    return synthetic_receipt("11" * 32)
                 if method == "zk.proof.get":
                     return {"proof_verified": False, "data_hex": "abcd"}
                 self.fail("unexpected synthetic RPC method")
 
             read.call.side_effect = response
             result = run_job(read, FakeControl(), "synthetic-artifact",
-                             "aa" * 32, "bb" * 32, 1, 1, cgroups)
+                             "aa" * 32, "bb" * 32, 1, 1, cgroups,
+                             block_hash="cc" * 32, block_height=42)
             self.assertEqual(result["status"], "verified_raito")
             self.assertFalse(result["proof_verified"])
             self.assertIn("RuntimeError", result["verification_error"])
@@ -357,7 +478,7 @@ class CgroupReportingTest(unittest.TestCase):
                                     "result_sha256": digest,
                                     "result_bytes": len(payload), "error": None}}
                 if method == "zk.proof.receipt":
-                    return {"verified_statement": {"txid": "bb" * 32}}
+                    return synthetic_receipt(digest)
                 if method == "zk.proof.get":
                     return {
                         "job_id": "fixture-job",
@@ -370,7 +491,8 @@ class CgroupReportingTest(unittest.TestCase):
 
             read.call.side_effect = response
             result = run_job(read, FakeControl(), "synthetic-artifact",
-                             "aa" * 32, "bb" * 32, 1, 1, cgroups)
+                             "aa" * 32, "bb" * 32, 1, 1, cgroups,
+                             block_hash="cc" * 32, block_height=42)
             self.assertTrue(result["observation_complete"])
             self.assertIsNone(result["verification_error"])
             self.assertTrue(result["proof_verified"])
