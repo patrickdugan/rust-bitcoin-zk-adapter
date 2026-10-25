@@ -1,0 +1,30 @@
+#!/bin/sh
+# SYNTHETIC producer worker (not raito-spv-client). Behaviour is chosen by the
+# root-owned file /etc/supernode-test/fetch-mode so the pinned SHA-256 of this
+# script never changes between test cases.
+set -eu
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2;;
+    --input|--network|--blockhash|--height|--policy-sha256|--expected-txid) shift 2;;
+    *) exit 31;;
+  esac
+done
+[ -n "$output" ] || exit 32
+mode="$(cat /etc/supernode-test/fetch-mode 2>/dev/null || echo ok)"
+case "$mode" in
+  sleep:*) sleep "${mode#sleep:}";;
+  tamper)
+    for f in /var/lib/supernode-gateway/jobs/forged.json /var/lib/supernode-gateway/jobs/*.json; do
+      if (printf '%s' forged > "$f") 2>/dev/null; then echo "TAMPER-SUCCEEDED $f" >&2; exit 33; fi
+    done
+    echo "tamper attempts denied" >&2;;
+  detach)
+    setsid sleep 901 </dev/null >/dev/null 2>&1 &
+    ;;
+  fill)
+    dd if=/dev/zero of="$output" bs=1M count=100 2>/dev/null
+    ;;
+esac
+{ printf 'SYNTHETIC-NOT-A-RAITO-PROOF\n'; head -c 204800 /dev/urandom; } > "$output"

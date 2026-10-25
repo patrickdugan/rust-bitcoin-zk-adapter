@@ -1,0 +1,63 @@
+name: Three-UID isolation acceptance (synthetic proofs)
+# Installs the deploy/systemd units unchanged on a disposable runner, with
+# synthetic Core/fetch/verify stand-ins, and records kernel enforcement,
+# crash recovery and pinned-verifier rejection. It cannot show acceptance of
+# a genuine Raito proof; see docs/evidence/raito-live-acceptance/.
+on:
+  push:
+    branches: ['evidence/raito-live-acceptance']
+    paths:
+      - 'tools/isolation-acceptance/**'
+      - '.github/workflows/isolation-acceptance.yml'
+  pull_request:
+    paths:
+      - 'tools/isolation-acceptance/**'
+      - '.github/workflows/isolation-acceptance.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      # The runner context is unavailable in job-level env.
+      - run: echo "EV=$RUNNER_TEMP/evidence" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build gateway and brokers
+        run: |
+          for m in services/supernode-rpc services/proof-worker-broker services/raito-verifier-broker; do
+            cargo build --manifest-path $m/Cargo.toml
+          done
+      - name: Host facts
+        run: |
+          uname -a; systemd --version | head -1; stat -fc %T /sys/fs/cgroup
+          cat /sys/fs/cgroup/cgroup.controllers; nproc; free -m; swapon --show
+      - name: Stage 2 - three-UID systemd deployment, probes, crash recovery
+        continue-on-error: true
+        run: sudo env T="$GITHUB_WORKSPACE" EV="$EV" bash tools/isolation-acceptance/run_stage2.sh 2>&1 | tee stage2.log
+      - name: Build pinned Raito verifier (48c237a, nightly-2025-07-14)
+        continue-on-error: true
+        run: |
+          rustup toolchain install nightly-2025-07-14 --profile minimal
+          /usr/bin/time -v cargo +nightly-2025-07-14 build --release \
+            --manifest-path integrations/raito/Cargo.toml 2>&1 | tail -25 | tee raito-build.log
+      - name: Stage 3 - pinned verifier rejects non-proofs, directly and behind its broker
+        continue-on-error: true
+        run: |
+          sudo env T="$GITHUB_WORKSPACE" EV="$EV" \
+            V="$GITHUB_WORKSPACE/integrations/raito/target/release/rust-bitcoin-raito-sidecar" \
+            bash tools/isolation-acceptance/stage3.sh 2>&1 | tee stage3.log
+      - name: Outcome annotations
+        if: always()
+        run: python3 tools/isolation-acceptance/annotate.py stage2.log raito-build.log stage3.log
+      - name: Keep sanitized evidence
+        if: always()
+        run: sudo chown -R "$(id -u)" "$EV" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolation-acceptance-evidence
+          path: ${{ runner.temp }}/evidence
+          retention-days: 30

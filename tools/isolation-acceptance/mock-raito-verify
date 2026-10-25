@@ -1,0 +1,22 @@
+#!/bin/sh
+# SYNTHETIC verifier (not raito-spv-verify). It never checks a STARK; it only
+# emits a receipt-shaped JSON so the gateway/broker plumbing can be exercised.
+# Behaviour comes from the root-owned file /etc/supernode-test/verify-mode.
+set -eu
+[ "$1" = "--gateway" ] || exit 20
+proof="$2"; txid="$3"; block="$4"; height="$5"; policy="$6"; out="$7"
+mode="$(cat /etc/supernode-test/verify-mode 2>/dev/null || echo ok)"
+digest="$(sha256sum "$proof" | cut -d' ' -f1)"
+case "$mode" in
+  sleep:*) sleep "${mode#sleep:}";;
+  reject) echo "synthetic verifier rejects" >&2; exit 3;;
+  wrongtxid) txid=0000000000000000000000000000000000000000000000000000000000000000;;
+  forgedproof) digest=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;;
+  detach) setsid sleep 902 </dev/null >/dev/null 2>&1 & ;;
+  tamper)
+    for f in /var/lib/supernode-gateway/jobs/*.json; do
+      if (printf '%s' forged > "$f") 2>/dev/null; then echo "TAMPER-SUCCEEDED $f" >&2; exit 33; fi
+    done;;
+esac
+printf '{"statement":"raito_spv_transaction_inclusion_v1","verifier":"raito-spv-verify/48c237ac941d8061a857ecd111d7e81107912556","txid":"%s","block_hash":"%s","block_height":%s,"proven_tip_height":%s,"tx_index":0,"proof_sha256":"%s","policy_sha256":"%s"}' \
+  "$txid" "$block" "$height" "$height" "$digest" "$policy" > "$out"
