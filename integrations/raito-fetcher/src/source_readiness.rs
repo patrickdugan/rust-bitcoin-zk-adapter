@@ -218,7 +218,14 @@ mod tests {
     fn explicit_source_required_and_ambiguity_fails_closed() {
         assert!(select_offline(&select(None, None), &request(), &job(), None).is_err());
         assert!(select_offline(
-            &select(Some(serde_json::json!({})), Some(bridge())),
+            &select(
+                Some(serde_json::json!({
+                    "path":"/synthetic/absent",
+                    "bytes":1,
+                    "sha256":"ee".repeat(32)
+                })),
+                Some(bridge()),
+            ),
             &request(),
             &job(),
             Some(&config())
