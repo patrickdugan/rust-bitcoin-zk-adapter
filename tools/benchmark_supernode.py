@@ -463,25 +463,45 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
         "zk.proof.submit", ["raito", artifact_id, memory_mib, policy, txid])
     job_id = response["job"]["id"]
     seen = {}
+    record = None
+    status = None
+    monitor_error = None
     while True:
-        record = gateway_read.call("zk.proof.status", [job_id])["job"]
-        status = record["status"]
+        try:
+            record = gateway_read.call("zk.proof.status", [job_id])["job"]
+            status = record["status"]
+        except Exception as exc:
+            # A lost status response leaves the job's true state unknown.
+            # Avoid propagating potentially sensitive remote error strings.
+            monitor_error = f"status RPC unavailable: {type(exc).__name__}"
+            break
+        if not isinstance(status, str) or len(status) > 64:
+            status = None
+            monitor_error = "invalid job status field"
+            break
         seen.setdefault(status, round(time.monotonic() - started, 3))
         if status in DONE:
             break
         if status not in PENDING:
-            raise RuntimeError(f"unrecognized proof job state {status}")
+            monitor_error = "unrecognized proof job state"
+            break
         if time.monotonic() - started > deadline:
-            raise TimeoutError(f"proof job {job_id} exceeded benchmark deadline")
+            monitor_error = "benchmark monitoring deadline exceeded"
+            break
         time.sleep(.25)
     result = {
         "job_id": job_id,
-        "status": record["status"],
-        "job_error": record.get("error"),
+        # A status sampled before monitoring failed is historical evidence,
+        # not proof of the job's current state.
+        "status": status,
+        "job_error": record.get("error") if isinstance(record, dict) else None,
         "wall_seconds": round(time.monotonic() - started, 3),
         "observed_status_transitions_seconds": seen,
-        "result_sha256": record.get("result_sha256"),
-        "proof_verified": status == "verified_raito",
+        "result_sha256": record.get("result_sha256") if isinstance(record, dict) else None,
+        "proof_verified": False,
+        "observation_complete": monitor_error is None,
+        "monitor_error": monitor_error,
+        "verification_error": None,
     }
     after = {
         role: snapshot_cgroup(path, expected.get(role))
@@ -499,12 +519,24 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
         result["cgroups_io_delta"] = {
             role: cgroup_io_delta(before[role], after[role]) for role in cgroups
         }
+    if monitor_error is not None:
+        return result
     if status == "verified_raito":
-        receipt = gateway_read.call("zk.proof.receipt", [job_id])
-        if receipt["verified_statement"]["txid"] != txid:
-            raise RuntimeError("verified receipt TXID mismatch")
-        result["receipt"] = receipt["verified_statement"]
-        result.update(proof_retrieve(gateway_read, job_id, record["result_sha256"]))
+        try:
+            receipt = gateway_read.call("zk.proof.receipt", [job_id])
+            if receipt["verified_statement"]["txid"] != txid:
+                raise ValueError("receipt transaction differs from benchmark request")
+            fetched = proof_retrieve(gateway_read, job_id, record["result_sha256"])
+        except Exception as exc:
+            # A gateway's status alone cannot count as a fully checked
+            # receipt or a locally reassembled, SHA-256-matched proof.
+            result["verification_error"] = (
+                f"receipt or proof retrieval failed: {type(exc).__name__}"
+            )
+        else:
+            result["receipt"] = receipt["verified_statement"]
+            result.update(fetched)
+            result["proof_verified"] = True
     return result
 
 
