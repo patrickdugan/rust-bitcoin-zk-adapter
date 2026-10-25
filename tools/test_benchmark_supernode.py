@@ -1,6 +1,7 @@
 """Unit checks for bounded Supernode benchmark helpers."""
 import contextlib
 import io
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from tools.benchmark_supernode import (
     cgroup_io_delta, main, loopback_url, percentiles, require_hash, run_job,
     select_cgroups, snapshot_cgroup, parse_cgroup_counter,
+    read_cgroup_counter_file, MAX_CGROUP_IO_STAT_BYTES, MAX_CGROUP_METRIC_BYTES,
 )
 
 
@@ -264,6 +266,76 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertEqual(before["producer"]["memory_current_bytes"], 89)
             self.assertEqual(before["verifier"]["memory_current_bytes"], 12)
             # The counter values carry no evidence of service identity.
+
+    def test_oversized_files_are_bounded_and_keep_valid_counters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), current=0, peak=200, swap=0)
+            (root / "memory.current").write_bytes(
+                b"9" * (MAX_CGROUP_METRIC_BYTES + 1))
+            (root / "io.stat").write_bytes(
+                b"8:0 rbytes=0 wbytes=0\n" + b" " * MAX_CGROUP_IO_STAT_BYTES)
+            snap = snapshot_cgroup(root)
+            self.assertIsNone(snap["memory_current_bytes"])
+            self.assertIn("exceeds", snap["errors"]["memory_current_bytes"])
+            self.assertIsNone(snap["io_devices"])
+            for field in ("io_read_bytes", "io_write_bytes"):
+                self.assertIsNone(snap[field])
+                self.assertIn("exceeds", snap["errors"][field])
+            self.assertEqual(snap["memory_peak_bytes"], 200)
+            self.assertEqual(snap["swap_peak_bytes"], 0)
+
+    def test_counter_limit_boundary_allows_exactly_cap_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "io.stat").write_bytes(b" " * MAX_CGROUP_IO_STAT_BYTES)
+            value = read_cgroup_counter_file(
+                root, "io.stat", MAX_CGROUP_IO_STAT_BYTES)
+            self.assertEqual(len(value), MAX_CGROUP_IO_STAT_BYTES)
+
+    def test_non_ascii_counters_are_malformed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp))
+            (root / "memory.current").write_bytes(b"\xff")
+            (root / "io.stat").write_bytes(b"\xff")
+            snap = snapshot_cgroup(root)
+            self.assertIsNone(snap["memory_current_bytes"])
+            self.assertIn("not ASCII", snap["errors"]["memory_current_bytes"])
+            self.assertIsNone(snap["io_devices"])
+            self.assertIsNone(snap["io_read_bytes"])
+            self.assertIn("not ASCII", snap["errors"]["io_read_bytes"])
+
+    def test_symlinked_counter_files_cannot_be_followed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self.fixture(base / "cgroup")
+            other = base / "unrelated-counter"
+            other.write_text("123", encoding="ascii")
+            for filename in ("memory.current", "io.stat"):
+                (root / filename).unlink()
+                (root / filename).symlink_to(other)
+            snap = snapshot_cgroup(root)
+            self.assertIsNone(snap["memory_current_bytes"])
+            self.assertIn("unavailable", snap["errors"]["memory_current_bytes"])
+            for key in ("io_read_bytes", "io_write_bytes"):
+                self.assertIsNone(snap[key])
+                self.assertIn("unavailable", snap["errors"][key])
+            self.assertEqual(snap["memory_peak_bytes"], 200)
+
+    def test_nonregular_fifo_counter_files_are_rejected(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("requires Unix FIFO fixture support")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp))
+            for filename in ("memory.peak", "io.stat"):
+                (root / filename).unlink()
+                os.mkfifo(root / filename)
+            # O_NONBLOCK avoids waiting for a writer before fstat validation.
+            snap = snapshot_cgroup(root)
+            self.assertIsNone(snap["memory_peak_bytes"])
+            self.assertIn("not a regular", snap["errors"]["memory_peak_bytes"])
+            self.assertIsNone(snap["io_read_bytes"])
+            self.assertIn("not a regular", snap["errors"]["io_read_bytes"])
+            self.assertEqual(snap["memory_current_bytes"], 100)
 
     def test_missing_counters_are_unavailable_not_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
