@@ -66,6 +66,13 @@ a description under the scope's `errors` map. A genuine counter value of
 zero remains numeric zero. `io.stat` sums per-device `rbytes` and `wbytes`
 only when the respective fields are present and valid on every listed device.
 An absent `memory.swap.peak` on some kernels is reported as unavailable.
+Counter-file reads are bounded to **128 bytes per memory metric** and
+**128 KiB for `io.stat`**. The Linux reader requires regular ASCII counter
+files and rejects symlinked files, FIFOs and oversized input. An oversized,
+non-ASCII or non-regular counter is reported as `null` with an explicit
+per-field error. These parser limits protect benchmark reporting against
+malformed local fixtures; they do not establish process ownership or enforce
+kernel resource budgets.
 Snapshots are taken before submission and after completion. Each snapshot
 also includes `io_devices`, which exposes the parsed per-device `rbytes`
 and `wbytes` counters for an auditable cumulative total. The new
