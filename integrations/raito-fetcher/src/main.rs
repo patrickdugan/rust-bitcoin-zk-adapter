@@ -1,6 +1,10 @@
 //! Operator-approved Raito compressed SPV proof fetcher.
 //! Fetching bytes is NEVER evidence of proof validity. The Supernode's
 //! independently pinned Raito verifier checks the resulting STARK statement.
+
+// Readiness is deliberately not wired into fetch(), job status or receipt publication.
+#[allow(dead_code)]
+mod source_readiness;
 use bitcoin::hashes::{sha256, Hash, HashEngine};
 use bitcoin::{BlockHash, Txid};
 use serde::Deserialize;
