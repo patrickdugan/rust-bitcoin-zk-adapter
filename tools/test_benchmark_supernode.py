@@ -161,7 +161,7 @@ class ProofRetrievalTest(unittest.TestCase):
                 self.assertEqual(len(gateway.calls), 1)
 
     def test_multi_chunk_total_change_or_short_chunk_is_rejected(self):
-        payload = b"x" * PROOF_CHUNK_BYTES + b"y"
+        payload = b"x" * PROOF_CHUNK_BYTES + b"yz"
         digest = hashlib.sha256(payload).hexdigest()
         baseline = self.chunks_for(payload)
         for change, reason in (
