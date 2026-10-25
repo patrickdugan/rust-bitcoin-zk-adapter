@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 from urllib.request import Request, build_opener, ProxyHandler
-from lifecycle import Observation, command, is_sleep, in_unit, crash_precondition
+from lifecycle import Observation, command, is_sleep, in_unit, detached_ready, crash_precondition
 
 SECRETS = "/root/rbzk-secrets"
 READ = open(f"{SECRETS}/read").read().strip()
@@ -211,10 +211,10 @@ def main():
         jid, err = submit()
         job, seen = wait_for(jid, {"verified_raito", "completed_unverified", "failed"})
         observed, before = obs.wait("after-job-before-stop", lambda e: any(
-            p["observed_unit"] == unit and is_sleep(p, seconds) and in_unit(p, unit)
+            p["observed_unit"] == unit and detached_ready(p, seconds, unit)
             for p in e["remaining"]), timeout=5)
         detached = [p for p in before["remaining"] if p["observed_unit"] == unit
-                    and is_sleep(p, seconds) and in_unit(p, unit)]
+                    and detached_ready(p, seconds, unit)]
         obs.save(os.path.join(evidence_dir, f"detach-{seconds}.json"))
         command("systemctl", "stop", unit)
         stopped, stop_event = obs.wait("service-stopped", lambda e:

@@ -187,6 +187,7 @@ fn clean_stale(root: &Path) -> Result<(), String> {
 }
 
 async fn launch_worker(
+    stream: &mut UnixStream,
     config: &Config,
     req: &RunRequest,
     input: &Path,
@@ -229,10 +230,29 @@ async fn launch_worker(
     let pid = i32::try_from(child.id().ok_or("worker has no PID")?)
         .map_err(|_| "worker PID exceeds signed range")?;
     let _cleanup = ProcessGroupCleanup(nix::unistd::Pid::from_raw(pid));
-    let status = timeout(MAX_WORKER_DURATION, child.wait())
-        .await
-        .map_err(|_| "broker worker exceeded 600-second timeout")?
-        .map_err(|e| e.to_string())?;
+    // Keep ownership of Child across client cancellation. Dropping the wait
+    // future alone kills on drop but can leave this broker's child unreaped.
+    let mut unexpected = [0u8; 1];
+    let result = tokio::select! {
+        biased;
+        _ = stream.read(&mut unexpected) => {
+            Err("gateway disconnected or sent trailing request bytes".to_owned())
+        }
+        result = timeout(MAX_WORKER_DURATION, child.wait()) => {
+            result.map_err(|_| "broker worker exceeded 600-second timeout".to_owned())
+                .and_then(|status| status.map_err(|e| e.to_string()))
+        }
+    };
+    // Retire the group, then reap the owned child before releasing staging
+    // and admission capacity. Keep zombies visible to acceptance checks.
+    drop(_cleanup);
+    if result.is_err() {
+        timeout(Duration::from_secs(5), child.wait())
+            .await
+            .map_err(|_| "cancelled subprocess was not reaped within five seconds")?
+            .map_err(|e| format!("failed to reap cancelled subprocess: {e}"))?;
+    }
+    let status = result?;
     if !status.success() {
         return Err(format!("approved Raito worker exited with {status}"));
     }
@@ -281,17 +301,7 @@ async fn accept_one(
     }
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
-    // The request body is complete; no further client bytes are permitted.
-    // Losing the gateway must cancel supervision, release capacity and remove
-    // staging instead of computing an orphaned job for up to ten minutes.
-    let mut unexpected = [0u8; 1];
-    tokio::select! {
-        biased;
-        _ = stream.read(&mut unexpected) => {
-            return Err("gateway disconnected or sent trailing request bytes".into());
-        }
-        result = launch_worker(config, &request, &input, &output) => result?,
-    }
+    launch_worker(stream, config, &request, &input, &output).await?;
     let (digest, size) = file_digest(&output, MAX_OUTPUT_BYTES)?;
     let reply = RunReply {
         version: VERSION,
@@ -464,7 +474,7 @@ mod tests {
             let binary = root.join("mock");
             fs::write(
                 &binary,
-                b"#!/bin/sh\nsleep 30 &\necho $! > \"$(dirname \"$0\")/child.pid\"\nwait\n",
+                b"#!/bin/sh\necho $$ > \"$(dirname \"$0\")/parent.pid\"\nsleep 30 &\necho $! > \"$(dirname \"$0\")/child.pid\"\nwait\n",
             )
             .unwrap();
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
@@ -502,6 +512,11 @@ mod tests {
             .await
             .unwrap();
             let pid: u32 = fs::read_to_string(marker).unwrap().trim().parse().unwrap();
+            let parent_pid: i32 = fs::read_to_string(root.join("parent.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
             if trailing {
                 client.write_all(b"unexpected").await.unwrap();
             } else {
@@ -511,18 +526,25 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            // waitpid must report no owned child. An exited-but-unreaped
+            // process would be returned here and make the assertion fail.
+            assert_eq!(
+                nix::sys::wait::waitpid(
+                    nix::unistd::Pid::from_raw(parent_pid),
+                    Some(nix::sys::wait::WaitPidFlag::WNOHANG)
+                ),
+                Err(nix::errno::Errno::ECHILD)
+            );
             assert_eq!(slots.available_permits(), 1);
             assert!(!staging.join(&request.job_id).exists());
             timeout(Duration::from_secs(3), async {
                 loop {
                     let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
-                    // A zombie is terminated, awaiting the host reaper.
+                    // Termination alone is insufficient: even a zombie
+                    // must disappear before this fixture reports cleanup.
                     if stat
                         .as_ref()
                         .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                        || stat
-                            .as_ref()
-                            .is_ok_and(|s| s.rsplit_once(") ").unwrap().1.starts_with('Z'))
                     {
                         break;
                     }

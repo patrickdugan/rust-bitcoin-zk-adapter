@@ -28,6 +28,28 @@ class LifecycleFixtures(unittest.TestCase):
         self.assertTrue(lc.same_process(proc(), proc()))
         self.assertFalse(lc.same_process(proc(), None))
 
+    def test_detached_readiness_requires_live_session_leader(self):
+        unit = "supernode-raito-verifier"
+        p = proc(argv=["sleep", "902"], cgroup=f"0::/system.slice/{unit}.service")
+        self.assertFalse(lc.detached_ready(p, 902, unit))
+        p.update(session=p["pid"], pgrp=p["pid"])
+        self.assertTrue(lc.detached_ready(p, 902, unit))
+        self.assertFalse(lc.detached_ready(p, 901, unit))
+        self.assertFalse(lc.detached_ready(p, 902, "supernode-proof-worker-broker"))
+        for state in ("Z", "X"):
+            self.assertFalse(lc.detached_ready(dict(p, state=state), 902, unit))
+
+    def test_cleanup_requires_zombie_identity_to_disappear(self):
+        obs = lc.Observation()
+        child = proc()
+        with patch.object(lc, "snapshot", return_value=sample([child])), patch.object(lc, "process", return_value=child):
+            obs.capture("running")
+        # Empty cgroup.procs alone must not erase an unreaped tracked PID.
+        with patch.object(lc, "snapshot", return_value=sample()), patch.object(lc, "process", return_value=dict(child, state="Z")):
+            self.assertFalse(obs.clean(timeout=0)[0])
+        with patch.object(lc, "snapshot", return_value=sample()), patch.object(lc, "process", return_value=None):
+            self.assertTrue(obs.clean(timeout=0)[0])
+
     def test_crash_requires_phase_and_real_worker_membership(self):
         unit = "supernode-proof-worker-broker"
         p = proc(cgroup=f"0::/system.slice/{unit}.service")

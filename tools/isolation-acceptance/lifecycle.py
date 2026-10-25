@@ -54,6 +54,12 @@ def in_unit(p, unit):
     return any(line == scope or line.startswith(scope + "/") for line in p["cgroup"])
 
 
+def detached_ready(p, seconds, unit):
+    return (is_sleep(p, seconds) and in_unit(p, unit)
+            and p["state"] not in {"Z", "X"}
+            and p["session"] == p["pgrp"] == p["pid"])
+
+
 def crash_precondition(job, current, phase, err, status_err, event, worker_unit):
     return (not err and not status_err and job.get("status") == phase
             and current.get("status") == phase and any(
