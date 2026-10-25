@@ -44,7 +44,7 @@ lines = open(sys.argv[1], encoding="utf8").read().splitlines()
 for name in ("empty.bin", "random.bin", "random.bin.bz2",
              "mock-proof.bin", "zero-bomb.bin.bz2"):
     found = [line for line in lines if line.startswith(name + ": ")]
-    if len(found) != 1 or not re.search(r"\\bexit=[1-9][0-9]* no-receipt\\b", found[0]):
+    if len(found) != 1 or not re.search(r"\bexit=[1-9][0-9]* no-receipt\b", found[0]):
         raise SystemExit("negative verifier case missing or unexpectedly accepted: " + name)
 PY
 echo "== wrong policy digest is refused before verification"
