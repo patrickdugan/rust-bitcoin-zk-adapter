@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import stat
 from pathlib import Path
 import statistics
 import time
@@ -131,6 +132,17 @@ def select_cgroups(worker: Path | None, producer: Path | None,
     return canonical
 
 
+def cgroup_fs_identity(root: Path) -> dict | None:
+    """Filesystem object ID for continuity checks, never a service UID."""
+    try:
+        metadata = root.stat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(metadata.st_mode):
+        return None
+    return {"device": metadata.st_dev, "inode": metadata.st_ino}
+
+
 def snapshot_cgroup(root: Path | None) -> dict:
     """Read cgroup-v2 counters without inventing zeros for absent data.
 
@@ -141,6 +153,7 @@ def snapshot_cgroup(root: Path | None) -> dict:
         return {}
     if not root.is_absolute():
         raise ValueError("cgroup path must be absolute")
+    identity_before = cgroup_fs_identity(root)
     result = {key: None for key in (
         "memory_current_bytes", "memory_peak_bytes", "swap_peak_bytes",
         "io_read_bytes", "io_write_bytes")}
@@ -211,6 +224,18 @@ def snapshot_cgroup(root: Path | None) -> dict:
                         errors[metric] = f"io.stat {field} total exceeds unsigned 64-bit range"
                     else:
                         result[metric] = totals[field]
+    identity_after = cgroup_fs_identity(root)
+    if identity_before is None or identity_before != identity_after:
+        # This sample can straddle a removed/recreated directory. Refuse to
+        # combine counters from two cgroups, even if individual bytes parse.
+        result["cgroup_fs_identity"] = None
+        result["io_devices"] = None
+        for key in ("memory_current_bytes", "memory_peak_bytes",
+                    "swap_peak_bytes", "io_read_bytes", "io_write_bytes"):
+            result[key] = None
+            errors[key] = "cgroup directory unavailable or changed during snapshot"
+    else:
+        result["cgroup_fs_identity"] = identity_before
     result["errors"] = errors
     return result
 
@@ -230,6 +255,16 @@ def cgroup_io_delta(before: dict, after: dict) -> dict:
         ("rbytes", "io_read_bytes", "io_read_delta_bytes"),
         ("wbytes", "io_write_bytes", "io_write_delta_bytes"),
     )
+    first_id = before.get("cgroup_fs_identity")
+    final_id = after.get("cgroup_fs_identity")
+    if not isinstance(first_id, dict) or not isinstance(final_id, dict):
+        for _, _, output in measurements:
+            result["errors"][output] = "cgroup filesystem identity unavailable"
+        return result
+    if first_id != final_id:
+        for _, _, output in measurements:
+            result["errors"][output] = "cgroup filesystem identity changed between samples"
+        return result
     if not isinstance(left, dict) or not isinstance(right, dict):
         for _, field, output in measurements:
             cause = (before.get("errors", {}).get(field) or
