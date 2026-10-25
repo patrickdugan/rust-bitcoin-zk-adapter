@@ -469,13 +469,16 @@ def validate_raito_receipt(reply: dict, job_id: str, txid: str,
 
 
 def proof_retrieve(gateway: RPC, job_id: str, expected_sha: str,
-                   expected_bytes: int | None = None) -> dict:
-    """Retrieve a bounded compressed Raito artifact from verified gateway RPC.
+                   expected_bytes: int | None = None, *,
+                   expected_statement: dict) -> dict:
+    """Retrieve compressed proof bytes bound to an already validated receipt.
 
-    The gateway's typed STARK receipt and Core chain checks are separate
-    prerequisites. This routine validates bytes and transfer metadata only.
+    Gateway-side pinned STARK verification and Core chain checks are distinct
+    prerequisites; this checks byte integrity and unchanged typed claims.
     """
     expected_sha = require_hash(expected_sha)
+    if not isinstance(expected_statement, dict):
+        raise ValueError("validated Raito receipt statement is required")
     if expected_bytes is not None and (
             type(expected_bytes) is not int
             or not 1 <= expected_bytes <= MAX_VERIFIED_PROOF_BYTES):
@@ -492,6 +495,13 @@ def proof_retrieve(gateway: RPC, job_id: str, expected_sha: str,
             raise RuntimeError("verified proof retrieval lost verified statement")
         if resp.get("job_id") != job_id:
             raise RuntimeError("retrieved chunk belongs to a different proof job")
+        chunk_statement = resp.get("verified_statement")
+        if (not isinstance(chunk_statement, dict)
+                or chunk_statement.keys() != expected_statement.keys()
+                or any(type(chunk_statement[field]) is not type(expected_statement[field])
+                       or chunk_statement[field] != expected_statement[field]
+                       for field in expected_statement)):
+            raise RuntimeError("proof chunk verified statement differs from receipt")
         claimed_digest = resp.get("result_sha256")
         if (not isinstance(claimed_digest, str)
                 or require_hash(claimed_digest) != expected_sha):
@@ -638,7 +648,7 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
             )
             fetched = proof_retrieve(
                 gateway_read, job_id, record["result_sha256"],
-                record.get("result_bytes")
+                record.get("result_bytes"), expected_statement=statement
             )
         except Exception as exc:
             # A gateway's status alone cannot count as a fully checked
