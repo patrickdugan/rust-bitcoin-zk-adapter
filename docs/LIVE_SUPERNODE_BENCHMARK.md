@@ -151,11 +151,25 @@ The `proof_verified` flag becomes true only after the gateway reports
 `verified_raito`, a typed receipt agrees with the requested TXID, and all
 downloaded proof chunks reassemble to the saved SHA-256. A receipt mismatch,
 broken retrieval, or corrupted output yields `proof_verified: false` and a
-`verification_error` while retaining the cgroup evidence. The environment's
-`live_stark_verification_observed` flag derives from those completed
-checks. It relies on the actual authenticated gateway and its pinned
-verifier; synthetic/mock RPCs in the unit tests demonstrate report control
-flow rather than real cryptographic acceptance.
+`verification_error` while retaining the cgroup evidence.
+
+**Bounded proof retrieval:** The reporter enforces the pinned verifier
+broker's **16 MiB compressed-proof limit**. It requests **64 KiB** chunks
+and stops after at most **256 chunks** or **660 seconds**. Every chunk must
+match the requested job ID and saved result SHA-256, report the same bounded
+`total_bytes`, have contiguous `offset`/`next_offset` values, contain
+strict even-length hexadecimal data of the expected chunk length, and carry
+the correct boolean `complete` marker. When the job status supplies
+`result_bytes`, the declared proof length must match it. The transfer
+fails closed on inconsistent claims, malformed bytes or short chunks,
+preserving the report's `verification_error`. This establishes transfer
+integrity relative to the authenticated gateway's job record, not proof
+validity by itself.
+
+The environment's `live_stark_verification_observed` flag derives from
+those completed checks. It relies on the actual authenticated gateway and
+its pinned verifier; synthetic/mock RPCs in the unit tests demonstrate
+report control flow rather than real cryptographic acceptance.
 
 For fair comparisons, use the same Bitcoin Core instance, same block and
 client process placement for both direct and proxied RPC. Run cold and warm
