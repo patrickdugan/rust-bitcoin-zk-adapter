@@ -54,7 +54,7 @@ class FakeRead:
 class CgroupReportingTest(unittest.TestCase):
     @staticmethod
     def fixture(path, current=100, peak=200, swap=0,
-                io_stat="8:0 rbytes=30 wbytes=40 rios=1 wios=1\\n"):
+                io_stat="8:0 rbytes=30 wbytes=40 rios=1 wios=1\n"):
         path.mkdir(parents=True, exist_ok=True)
         for filename, value in (
             ("memory.current", current), ("memory.peak", peak),
@@ -75,10 +75,10 @@ class CgroupReportingTest(unittest.TestCase):
             base = Path(tmp)
             producer = self.fixture(
                 base / "producer", current=111, peak=222, swap=0,
-                io_stat="8:0 rbytes=5 wbytes=7\\n8:16 rbytes=11 wbytes=13\\n")
+                io_stat="8:0 rbytes=5 wbytes=7\n8:16 rbytes=11 wbytes=13\n")
             verifier = self.fixture(
                 base / "verifier", current=333, peak=444, swap=1,
-                io_stat="8:0 rbytes=23 wbytes=29\\n")
+                io_stat="8:0 rbytes=23 wbytes=29\n")
             roles = select_cgroups(None, producer, verifier)
             job = self.job(roles)
             self.assertNotIn("cgroup_before", job)
@@ -120,7 +120,7 @@ class CgroupReportingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(
                 Path(tmp), current="max", peak="-1", swap="garbage",
-                io_stat="8:0 rbytes=invalid wbytes=32\\n")
+                io_stat="8:0 rbytes=invalid wbytes=32\n")
             snap = snapshot_cgroup(root)
             for key in ("memory_current_bytes", "memory_peak_bytes",
                         "swap_peak_bytes", "io_read_bytes"):
@@ -132,13 +132,13 @@ class CgroupReportingTest(unittest.TestCase):
     def test_missing_device_field_and_repeated_devices_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(
-                Path(tmp), io_stat="8:0 rbytes=5 wbytes=6\\n8:16 rbytes=7\\n")
+                Path(tmp), io_stat="8:0 rbytes=5 wbytes=6\n8:16 rbytes=7\n")
             snap = snapshot_cgroup(root)
             self.assertEqual(snap["io_read_bytes"], 12)
             self.assertIsNone(snap["io_write_bytes"])
             self.assertIn("io_write_bytes", snap["errors"])
             (root / "io.stat").write_text(
-                "8:0 rbytes=5 wbytes=6\\n8:0 rbytes=7 wbytes=8\\n", encoding="ascii")
+                "8:0 rbytes=5 wbytes=6\n8:0 rbytes=7 wbytes=8\n", encoding="ascii")
             snap = snapshot_cgroup(root)
             self.assertIsNone(snap["io_read_bytes"])
             self.assertIsNone(snap["io_write_bytes"])
