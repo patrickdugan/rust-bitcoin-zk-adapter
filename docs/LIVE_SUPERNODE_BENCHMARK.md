@@ -135,9 +135,27 @@ after confirming that scope actually includes both service roles.
 
 Output contains p50/p95/p99 RPC latency in milliseconds, per-job wall time,
 observed state transitions, retrieved proof byte counts, and verification
-result. A failure remains visible as `completed_unverified` or `failed`.
-Only a real positive Raito verifier receipt sets
-`live_stark_verification_observed: true`.
+result. A terminal gateway failure remains visible as `completed_unverified`
+or `failed`.
+
+**Incomplete observations:** If `zk.proof.status` becomes unavailable, returns
+an unsupported state, or exceeds the benchmark deadline, the job report
+retains the last observed `status` (or `null` if none was received) with
+`observation_complete: false`, an explicit `monitor_error`, and its available
+before/after cgroup snapshots and interval I/O counters. These fields describe
+what the benchmark observed; the actual gateway job may still be running.
+An RPC exception's **type** is recorded without including remote error text.
+A successful terminal-state poll sets `observation_complete: true`.
+
+The `proof_verified` flag becomes true only after the gateway reports
+`verified_raito`, a typed receipt agrees with the requested TXID, and all
+downloaded proof chunks reassemble to the saved SHA-256. A receipt mismatch,
+broken retrieval, or corrupted output yields `proof_verified: false` and a
+`verification_error` while retaining the cgroup evidence. The environment's
+`live_stark_verification_observed` flag derives from those completed
+checks. It relies on the actual authenticated gateway and its pinned
+verifier; synthetic/mock RPCs in the unit tests demonstrate report control
+flow rather than real cryptographic acceptance.
 
 For fair comparisons, use the same Bitcoin Core instance, same block and
 client process placement for both direct and proxied RPC. Run cold and warm
