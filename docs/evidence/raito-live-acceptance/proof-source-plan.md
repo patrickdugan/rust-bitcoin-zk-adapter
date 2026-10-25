@@ -95,3 +95,68 @@ Treat these as order-of-magnitude estimates until step C0 below has run.
 
 Decision needed from the operator: approve B (and C0), and whether to send
 the request in A.
+
+## Results of B and C0 (run 2026-10-25 on `zk`, approved)
+
+**B: running.**
+
+- Bitcoin Core 31.1 (tarball checked against `SHA256SUMS`; signatures not
+  checked). Digests: `bitcoind` `986e63b3…8a08`, `bitcoin-cli` `4e3a0fde…6034`.
+- Runs as the systemd unit `bitcoind-main` with `prune=20000`,
+  `dbcache=12000`, `blocksonly=1` and loopback RPC. All 960,000 headers
+  arrived within minutes; block validation is in progress.
+- `raito-bridge-node` runs as `raito-bridge` on `127.0.0.1:5000`, indexing
+  blocks into the MMR behind Core's tip.
+
+**Building the pinned tools needed two lockfile fixes.** Raito at `48c237a`
+does not commit a `Cargo.lock`, and a fresh resolve no longer builds on the
+pinned toolchain:
+
+- `google-cloud-*` 1.18 requires rustc 1.91. Fixed by regenerating the
+  lockfile with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`.
+- `ruint` 1.21.1 uses a const fn that is not yet stable. Fixed by
+  `cargo update -p ruint --precise 1.17.0`.
+
+Results, built with `nightly-2025-07-14 --locked --release`:
+
+| Item | Value |
+| --- | --- |
+| Build | 7 min 57 s, 3.1 GB peak |
+| `raito-assumevalid` | `c5b4ad25140f63659e9a6e4790c0f695cfa96f52f879a2a296ce2988a96ba0d0` |
+| `raito-bridge-node` | `c780b977303d29582430f43492615f9984b0fcd8592c8eb643a7e6448512d0f4` |
+| Generated `Cargo.lock` | `ba64309693ce745a50b070556146eb8ad0ee0ca7f8fb6dcba219ad8793c122c2` |
+
+**C0: measured.** `raito-assumevalid prove` from genesis, stock prover,
+under a transient unit with `MemoryMax=28G` and `MemorySwapMax=0`:
+
+| Batch | Cairo steps | VM | Adapt | Prover |
+| --- | --- | --- | --- | --- |
+| 1 block (0–1) | 6,242,367 | 8.1 s | 2.5 s | **OOM-killed at 28 GiB** after ~55 s |
+| 10 blocks (0–10) | 6,324,042 | 8.2 s | 16.6 s | **OOM-killed at 28 GiB** after ~4.5 min |
+
+What this shows:
+
+- **The marginal cost is ~9k steps per header.** That is far below the
+  81k-step `chain_segment` figure used in the estimate above.
+- **The cost is dominated by a fixed ~6.2M-step floor per proof**
+  (bootloader plus program).
+- **Even the first, non-recursive proof does not fit in 28 GiB on `zk`.**
+  The stock preprocessed trace plus a 2²³-row trace exceed it. A bounded
+  preprocessed trace would change what the pinned `dev=false` verifier
+  expects, so it is not an option for acceptance. **Option C is BLOCKED
+  on `zk`.**
+
+Revised estimate for C on a larger machine: 920k headers × ~9k steps ≈
+8.3 × 10⁹ marginal steps. With batches of a few thousand blocks, that is
+about 150–300 recursive proofs. The size of each recursive (previous-proof
+verification) step is still unmeasured; it is the next calibration, and it
+needs a machine with **≥128 GB RAM**. Rough cost: 1–2 days on a 32–64 core,
+256 GB machine, order **$100–400** (estimate, not measured).
+
+**Next steps:**
+
+1. Keep B running until Core reaches the tip. It is needed for any positive
+   run.
+2. Pursue option A (ask the Raito maintainers for a retained `recent_proof`).
+3. If C is wanted, provision a ≥128 GB machine and re-run C0 with two
+   batches to measure the recursive step before committing to the full chain.
