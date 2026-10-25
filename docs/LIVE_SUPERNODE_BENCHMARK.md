@@ -42,6 +42,10 @@ operator's host. The parser requires absolute directory paths, checks their
 canonical locations and rejects identical, nested or symlink-aliased
 producer/verifier paths. Supplying only one role, or combining either role
 with `--worker-cgroup`, is an argument error **before credentials are read**.
+Repeating any cgroup flag, even with the same value, is also rejected
+rather than silently taking the final occurrence. Once validated, scope
+reads use the resolved canonical directory, so retargeting an input
+symlink after argument parsing cannot silently swap the sampled role.
 
 `--worker-cgroup PATH` remains the **legacy single-cgroup option** for an
 operator-confirmed scope that encloses all workers to be measured. It keeps
