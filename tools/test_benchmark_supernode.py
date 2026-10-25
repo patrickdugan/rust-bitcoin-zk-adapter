@@ -203,6 +203,7 @@ class ProofRetrievalTest(unittest.TestCase):
                 "job_id": job,
                 "result_sha256": digest,
                 "proof_verified": True,
+                "verified_statement": synthetic_receipt(digest)["verified_statement"],
                 "total_bytes": len(payload),
                 "offset": offset,
                 "next_offset": min(offset + PROOF_CHUNK_BYTES, len(payload)),
@@ -212,11 +213,66 @@ class ProofRetrievalTest(unittest.TestCase):
             for offset in range(0, len(payload), PROOF_CHUNK_BYTES)
         ]
 
+    @staticmethod
+    def retrieve(gateway, job_id, digest, expected_bytes=None):
+        return proof_retrieve(
+            gateway, job_id, digest, expected_bytes,
+            expected_statement=synthetic_receipt(digest)["verified_statement"]
+        )
+
+    def test_chunk_without_typed_receipt_is_rejected(self):
+        payload = b"synthetic proof"
+        digest = hashlib.sha256(payload).hexdigest()
+        for bad in (None, [], False):
+            with self.subTest(bad=bad):
+                chunk = self.chunks_for(payload)[0]
+                chunk["verified_statement"] = bad
+                gateway = SyntheticChunkGateway([chunk])
+                with self.assertRaisesRegex(
+                        RuntimeError, "verified statement differs from receipt"):
+                    self.retrieve(gateway, "fixture-job", digest)
+                self.assertEqual(len(gateway.calls), 1)
+
+    def test_every_chunk_must_agree_with_original_typed_receipt(self):
+        payload = b"x" * PROOF_CHUNK_BYTES + b"yz"
+        digest = hashlib.sha256(payload).hexdigest()
+        for changed_chunk in (0, 1):
+            for mutation in ("txid", "policy", "bool_index", "missing_field", "extra_field"):
+                with self.subTest(chunk=changed_chunk, mutation=mutation):
+                    responses = self.chunks_for(payload)
+                    statement = responses[changed_chunk]["verified_statement"].copy()
+                    if mutation == "txid":
+                        statement["txid"] = "dd" * 32
+                    elif mutation == "policy":
+                        statement["policy_sha256"] = "ee" * 32
+                    elif mutation == "bool_index":
+                        # Python would normally consider 0 == False.
+                        statement["tx_index"] = False
+                    elif mutation == "missing_field":
+                        del statement["verifier"]
+                    elif mutation == "extra_field":
+                        statement["untrusted"] = True
+                    responses[changed_chunk]["verified_statement"] = statement
+                    gateway = SyntheticChunkGateway(responses)
+                    with self.assertRaisesRegex(
+                            RuntimeError, "verified statement differs from receipt"):
+                        self.retrieve(gateway, "fixture-job", digest, len(payload))
+                    self.assertEqual(len(gateway.calls), changed_chunk + 1)
+
+    def test_missing_expected_statement_rejected_before_rpc(self):
+        gateway = SyntheticChunkGateway([])
+        with self.assertRaisesRegex(ValueError, "validated Raito receipt statement"):
+            proof_retrieve(
+                gateway, "fixture-job", "11" * 32,
+                expected_statement=None
+            )
+        self.assertEqual(gateway.calls, [])
+
     def test_two_chunk_proof_has_consistent_length_hash_and_offsets(self):
         payload = bytes(range(256)) * 256 + b"z"
         digest = hashlib.sha256(payload).hexdigest()
         server = SyntheticChunkGateway(self.chunks_for(payload))
-        report = proof_retrieve(server, "fixture-job", digest, len(payload))
+        report = self.retrieve(server, "fixture-job", digest, len(payload))
         self.assertEqual(report["proof_bytes"], len(payload))
         self.assertEqual(report["chunks"], 2)
         self.assertEqual(report["proof_sha256"], digest)
@@ -236,7 +292,7 @@ class ProofRetrievalTest(unittest.TestCase):
                 response["total_bytes"] = total
                 gateway = SyntheticChunkGateway([response])
                 with self.assertRaisesRegex(RuntimeError, "16 MiB"):
-                    proof_retrieve(gateway, "fixture-job", digest)
+                    self.retrieve(gateway, "fixture-job", digest)
                 self.assertEqual(len(gateway.calls), 1)
 
     def test_status_record_size_must_match_transferred_size(self):
@@ -245,11 +301,11 @@ class ProofRetrievalTest(unittest.TestCase):
         for expected_bytes in (0, -1, True, MAX_VERIFIED_PROOF_BYTES + 1):
             with self.subTest(expected_bytes=expected_bytes):
                 with self.assertRaises(ValueError):
-                    proof_retrieve(SyntheticChunkGateway([]),
+                    self.retrieve(SyntheticChunkGateway([]),
                                    "fixture-job", digest, expected_bytes)
         gateway = SyntheticChunkGateway(self.chunks_for(payload))
         with self.assertRaisesRegex(RuntimeError, "differs from job record"):
-            proof_retrieve(gateway, "fixture-job", digest, len(payload) + 1)
+            self.retrieve(gateway, "fixture-job", digest, len(payload) + 1)
         self.assertEqual(len(gateway.calls), 1)
 
     def test_conflicting_chunk_claims_fail_closed(self):
@@ -276,7 +332,7 @@ class ProofRetrievalTest(unittest.TestCase):
                 response[key] = value
                 gateway = SyntheticChunkGateway([response])
                 with self.assertRaisesRegex(RuntimeError, message):
-                    proof_retrieve(gateway, "fixture-job", digest)
+                    self.retrieve(gateway, "fixture-job", digest)
                 self.assertEqual(len(gateway.calls), 1)
 
     def test_multi_chunk_total_change_or_short_chunk_is_rejected(self):
@@ -293,7 +349,7 @@ class ProofRetrievalTest(unittest.TestCase):
                 response[1].update(change)
                 gateway = SyntheticChunkGateway(response)
                 with self.assertRaisesRegex(RuntimeError, reason):
-                    proof_retrieve(gateway, "fixture-job", digest)
+                    self.retrieve(gateway, "fixture-job", digest)
                 self.assertEqual(len(gateway.calls), 2)
 
     def test_hash_mismatch_rejects_well_framed_but_changed_bytes(self):
@@ -302,7 +358,7 @@ class ProofRetrievalTest(unittest.TestCase):
         original["data_hex"] = b"synthetic pr00f".hex()
         server = SyntheticChunkGateway([original])
         with self.assertRaisesRegex(RuntimeError, "reassembled proof SHA-256 mismatch"):
-            proof_retrieve(server, "fixture-job", hashlib.sha256(payload).hexdigest())
+            self.retrieve(server, "fixture-job", hashlib.sha256(payload).hexdigest())
 
     def test_retrieval_deadline_stops_before_extra_rpc(self):
         payload = b"a"
@@ -310,7 +366,7 @@ class ProofRetrievalTest(unittest.TestCase):
         with patch("tools.benchmark_supernode.time.monotonic",
                    side_effect=[0, MAX_PROOF_DOWNLOAD_SECONDS + 1]):
             with self.assertRaisesRegex(RuntimeError, "deadline"):
-                proof_retrieve(gateway, "fixture-job", hashlib.sha256(payload).hexdigest())
+                self.retrieve(gateway, "fixture-job", hashlib.sha256(payload).hexdigest())
         self.assertEqual(gateway.calls, [])
 
 
@@ -483,7 +539,9 @@ class CgroupReportingTest(unittest.TestCase):
                     return {
                         "job_id": "fixture-job",
                         "result_sha256": digest,
-                        "proof_verified": True, "data_hex": payload.hex(),
+                        "proof_verified": True,
+                        "verified_statement": synthetic_receipt(digest)["verified_statement"],
+                        "data_hex": payload.hex(),
                         "offset": 0, "next_offset": len(payload),
                         "complete": True, "total_bytes": len(payload),
                     }
@@ -498,6 +556,45 @@ class CgroupReportingTest(unittest.TestCase):
             self.assertTrue(result["proof_verified"])
             self.assertTrue(result["digest_matches_job"])
             self.assertEqual(result["proof_sha256"], digest)
+
+    def test_chunk_statement_mismatch_cannot_promote_verified_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            selected = select_cgroups(self.fixture(Path(tmp) / "worker"), None, None)
+            payload = b"synthetic bytes, NOT a STARK proof"
+            digest = hashlib.sha256(payload).hexdigest()
+            read = Mock()
+
+            def response(method, params):
+                if method == "zk.proof.status":
+                    return {"job": {"status": "verified_raito",
+                                    "result_sha256": digest,
+                                    "result_bytes": len(payload), "error": None}}
+                if method == "zk.proof.receipt":
+                    return synthetic_receipt(digest)
+                if method == "zk.proof.get":
+                    altered = synthetic_receipt(digest)["verified_statement"]
+                    altered = dict(altered, proven_tip_height=43, txid="dd" * 32)
+                    return {
+                        "job_id": "fixture-job",
+                        "result_sha256": digest,
+                        "proof_verified": True,
+                        "verified_statement": altered,
+                        "data_hex": payload.hex(),
+                        "offset": 0, "next_offset": len(payload),
+                        "complete": True, "total_bytes": len(payload),
+                    }
+                self.fail("unexpected synthetic RPC method")
+
+            read.call.side_effect = response
+            result = run_job(read, FakeControl(), "fixture-artifact",
+                             "aa" * 32, "bb" * 32, 1, 1, selected,
+                             block_hash="cc" * 32, block_height=42)
+            self.assertEqual(result["status"], "verified_raito")
+            self.assertTrue(result["observation_complete"])
+            self.assertFalse(result["proof_verified"])
+            self.assertIn("RuntimeError", result["verification_error"])
+            self.assertIn("cgroup_io_delta", result)
+            self.assertNotIn("receipt", result)
 
     def test_missing_optional_counter_does_not_block_a_valid_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
