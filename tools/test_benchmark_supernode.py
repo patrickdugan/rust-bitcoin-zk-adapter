@@ -1,5 +1,6 @@
 """Unit checks for bounded Supernode benchmark helpers."""
 import contextlib
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -91,6 +92,155 @@ class CgroupReportingTest(unittest.TestCase):
             run_job(FakeRead(), control, "fixture-artifact",
                     "aa" * 32, "bb" * 32, 1, 1, cgroups)
         control.call.assert_not_called()
+
+    def test_status_rpc_error_keeps_cgroup_evidence_without_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(
+                Path(tmp) / "worker", io_stat="8:0 rbytes=5 wbytes=9\n")
+
+            def status_fails(method, params):
+                self.assertEqual(method, "zk.proof.status")
+                (root / "io.stat").write_text(
+                    "8:0 rbytes=13 wbytes=10\n", encoding="ascii")
+                raise RuntimeError("SECRET_TOKEN_IN_REMOTE_EXCEPTION")
+
+            read = Mock()
+            read.call.side_effect = status_fails
+            report = run_job(
+                read, FakeControl(), "synthetic-artifact",
+                "aa" * 32, "bb" * 32, 1, 1,
+                select_cgroups(root, None, None),
+            )
+            self.assertFalse(report["observation_complete"])
+            self.assertFalse(report["proof_verified"])
+            self.assertIsNone(report["status"])
+            self.assertEqual(report["job_id"], "fixture-job")
+            self.assertEqual(report["cgroup_io_delta"]["io_read_delta_bytes"], 8)
+            self.assertEqual(report["cgroup_io_delta"]["io_write_delta_bytes"], 1)
+            self.assertIn("status RPC unavailable: RuntimeError", report["monitor_error"])
+            self.assertNotIn("SECRET_TOKEN", str(report))
+            self.assertNotIn("receipt", report)
+
+    def test_monitor_timeout_retains_last_known_running_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            producer = self.fixture(
+                Path(tmp) / "producer", io_stat="8:0 rbytes=9 wbytes=2\n")
+            verifier = self.fixture(
+                Path(tmp) / "verifier", io_stat="8:0 rbytes=1 wbytes=1\n")
+            read = Mock()
+            read.call.return_value = {"job": {"status": "running",
+                                               "error": None,
+                                               "result_sha256": None}}
+            # An already-expired deadline exercises timeout without sleeping.
+            report = run_job(
+                read, FakeControl(), "synthetic-artifact",
+                "aa" * 32, "bb" * 32, 1, -1,
+                select_cgroups(None, producer, verifier),
+            )
+            self.assertEqual(report["status"], "running")
+            self.assertEqual(report["monitor_error"],
+                             "benchmark monitoring deadline exceeded")
+            self.assertFalse(report["observation_complete"])
+            self.assertFalse(report["proof_verified"])
+            self.assertIn("running", report["observed_status_transitions_seconds"])
+            self.assertEqual(report["cgroups_io_delta"]["producer"]["io_read_delta_bytes"], 0)
+            self.assertEqual(report["cgroups_io_delta"]["verifier"]["io_write_delta_bytes"], 0)
+
+    def test_unknown_or_invalid_job_status_keeps_unverified_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cgroups = select_cgroups(self.fixture(Path(tmp) / "worker"), None, None)
+            for invalid, expected in (
+                ("unknown_future_state", "unrecognized proof job state"),
+                (["verified_raito"], "invalid job status field"),
+            ):
+                with self.subTest(value=invalid):
+                    read = Mock()
+                    read.call.return_value = {
+                        "job": {"status": invalid, "result_sha256": None}
+                    }
+                    result = run_job(read, FakeControl(), "synthetic-artifact",
+                                     "aa" * 32, "bb" * 32, 1, 1, cgroups)
+                    self.assertEqual(result["monitor_error"], expected)
+                    self.assertFalse(result["observation_complete"])
+                    self.assertFalse(result["proof_verified"])
+                    self.assertIn("cgroup_before", result)
+
+    def test_forged_verified_receipt_preserves_observation_as_unverified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cgroups = select_cgroups(self.fixture(Path(tmp) / "worker"), None, None)
+            read = Mock()
+
+            def response(method, params):
+                if method == "zk.proof.status":
+                    return {"job": {"status": "verified_raito",
+                                    "result_sha256": "11" * 32, "error": None}}
+                if method == "zk.proof.receipt":
+                    return {"verified_statement": {"txid": "cc" * 32}}
+                self.fail("proof retrieval started after mismatched receipt")
+
+            read.call.side_effect = response
+            result = run_job(read, FakeControl(), "synthetic-artifact",
+                             "aa" * 32, "bb" * 32, 1, 1, cgroups)
+            self.assertEqual(result["status"], "verified_raito")
+            self.assertTrue(result["observation_complete"])
+            self.assertFalse(result["proof_verified"])
+            self.assertIn("ValueError", result["verification_error"])
+            self.assertIn("cgroup_after", result)
+            self.assertNotIn("receipt", result)
+
+    def test_bad_proof_chunk_cannot_promote_gateway_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cgroups = select_cgroups(self.fixture(Path(tmp) / "worker"), None, None)
+            read = Mock()
+
+            def response(method, params):
+                if method == "zk.proof.status":
+                    return {"job": {"status": "verified_raito",
+                                    "result_sha256": "11" * 32, "error": None}}
+                if method == "zk.proof.receipt":
+                    return {"verified_statement": {"txid": "bb" * 32}}
+                if method == "zk.proof.get":
+                    return {"proof_verified": False, "data_hex": "abcd"}
+                self.fail("unexpected synthetic RPC method")
+
+            read.call.side_effect = response
+            result = run_job(read, FakeControl(), "synthetic-artifact",
+                             "aa" * 32, "bb" * 32, 1, 1, cgroups)
+            self.assertEqual(result["status"], "verified_raito")
+            self.assertFalse(result["proof_verified"])
+            self.assertIn("RuntimeError", result["verification_error"])
+            self.assertIn("cgroup_io_delta", result)
+            self.assertNotIn("receipt", result)
+
+    def test_synthetic_receipt_and_reassembled_digest_finish_successfully(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cgroups = select_cgroups(self.fixture(Path(tmp) / "worker"), None, None)
+            payload = b"synthetic bytes, NOT a STARK proof"
+            digest = hashlib.sha256(payload).hexdigest()
+            read = Mock()
+
+            def response(method, params):
+                if method == "zk.proof.status":
+                    return {"job": {"status": "verified_raito",
+                                    "result_sha256": digest, "error": None}}
+                if method == "zk.proof.receipt":
+                    return {"verified_statement": {"txid": "bb" * 32}}
+                if method == "zk.proof.get":
+                    return {
+                        "proof_verified": True, "data_hex": payload.hex(),
+                        "offset": 0, "complete": True,
+                        "total_bytes": len(payload),
+                    }
+                self.fail("unexpected synthetic RPC method")
+
+            read.call.side_effect = response
+            result = run_job(read, FakeControl(), "synthetic-artifact",
+                             "aa" * 32, "bb" * 32, 1, 1, cgroups)
+            self.assertTrue(result["observation_complete"])
+            self.assertIsNone(result["verification_error"])
+            self.assertTrue(result["proof_verified"])
+            self.assertTrue(result["digest_matches_job"])
+            self.assertEqual(result["proof_sha256"], digest)
 
     def test_missing_optional_counter_does_not_block_a_valid_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
