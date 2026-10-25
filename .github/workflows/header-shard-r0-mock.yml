@@ -1,0 +1,30 @@
+name: Header shard R0 mock contract
+
+# Structural fixtures only. No Bitcoin Core, proof system, network probes or
+# authentic Raito verification is invoked by the test step.
+on:
+  push:
+    branches: ['research/header-shard-r0-contract']
+    paths:
+      - 'tools/research/header_shard_manifest.py'
+      - 'tools/research/test_header_shard_manifest.py'
+      - 'docs/HEADER_SHARD_R0_EXPERIMENT.md'
+      - '.github/workflows/header-shard-r0-mock.yml'
+  pull_request:
+    paths:
+      - 'tools/research/header_shard_manifest.py'
+      - 'tools/research/test_header_shard_manifest.py'
+      - 'docs/HEADER_SHARD_R0_EXPERIMENT.md'
+      - '.github/workflows/header-shard-r0-mock.yml'
+permissions:
+  contents: read
+jobs:
+  offline-fixtures:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python3 -m py_compile tools/research/header_shard_manifest.py tools/research/test_header_shard_manifest.py
+      - name: Mock shard structure adversarial fixtures (NOT a proof)
+        run: python3 -m unittest discover -s tools/research -p 'test_header_shard_manifest.py' -v
