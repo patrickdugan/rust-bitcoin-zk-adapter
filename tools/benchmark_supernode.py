@@ -31,6 +31,9 @@ MAX_VERIFIED_PROOF_BYTES = 16 * 1024 * 1024
 PROOF_CHUNK_BYTES = 64 * 1024
 MAX_PROOF_CHUNKS = MAX_VERIFIED_PROOF_BYTES // PROOF_CHUNK_BYTES
 MAX_PROOF_DOWNLOAD_SECONDS = 660
+RAITO_STATEMENT = "raito_spv_transaction_inclusion_v1"
+RAITO_VERIFIER = "raito-spv-verify/48c237ac941d8061a857ecd111d7e81107912556"
+MAX_RAITO_HEIGHT = (1 << 32) - 1
 
 
 class UniqueCgroupPath(argparse.Action):
@@ -411,6 +414,60 @@ def require_selected_scopes_unchanged(cgroups: dict[str, Path],
             )
 
 
+def validate_raito_receipt(reply: dict, job_id: str, txid: str,
+                           block_hash: str | None, block_height: int | None,
+                           policy_sha256: str, proof_sha256: str) -> dict:
+    """Independently bind the gateway's typed receipt to the submitted job.
+
+    This checks the receipt shape and claim consistency; only the pinned
+    external Cairo/STWO verifier can establish the cryptographic statement.
+    Active-chain selection still depends on authenticated Bitcoin Core RPC.
+    """
+    if block_hash is None or block_height is None:
+        raise ValueError("benchmark lacks expected block binding for receipt")
+    if type(block_height) is not int or not 0 <= block_height <= MAX_RAITO_HEIGHT:
+        raise ValueError("invalid expected block height")
+    targets = {
+        "txid": require_hash(txid),
+        "block_hash": require_hash(block_hash),
+        "proof_sha256": require_hash(proof_sha256),
+        "policy_sha256": require_hash(policy_sha256),
+    }
+    if (not isinstance(reply, dict)
+            or reply.get("job_id") != job_id
+            or reply.get("proof_verified") is not True
+            or reply.get("active_chain_at_lookup") is not True
+            or reply.get("output_retained") is not True):
+        raise ValueError("gateway receipt lacks verified job or active-chain binding")
+    reported_sha = reply.get("result_sha256")
+    if (not isinstance(reported_sha, str)
+            or require_hash(reported_sha) != targets["proof_sha256"]):
+        raise ValueError("gateway receipt proof digest differs from job")
+    receipt = reply.get("verified_statement")
+    expected_fields = {
+        "statement", "verifier", "txid", "block_hash", "block_height",
+        "proven_tip_height", "tx_index", "proof_sha256", "policy_sha256",
+    }
+    if not isinstance(receipt, dict) or receipt.keys() != expected_fields:
+        raise ValueError("gateway returned malformed typed Raito receipt")
+    if (receipt["statement"] != RAITO_STATEMENT
+            or receipt["verifier"] != RAITO_VERIFIER):
+        raise ValueError("Raito receipt statement or verifier identity differs")
+    for field, expected in targets.items():
+        value = receipt[field]
+        if not isinstance(value, str) or require_hash(value) != expected:
+            raise ValueError(f"Raito receipt {field} differs from submitted job")
+    if (type(receipt["block_height"]) is not int
+            or receipt["block_height"] != block_height
+            or type(receipt["proven_tip_height"]) is not int
+            or not block_height <= receipt["proven_tip_height"] <= MAX_RAITO_HEIGHT
+            or type(receipt["tx_index"]) is not int
+            or not 0 <= receipt["tx_index"] <= MAX_RAITO_HEIGHT):
+        raise ValueError("Raito receipt block height, proof tip or transaction index invalid")
+    return receipt
+
+
+
 def proof_retrieve(gateway: RPC, job_id: str, expected_sha: str,
                    expected_bytes: int | None = None) -> dict:
     """Retrieve a bounded compressed Raito artifact from verified gateway RPC.
@@ -501,7 +558,8 @@ def measure_pair(core: RPC, gateway: RPC, height: int, samples: int) -> dict:
 
 def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
             policy: str, txid: str, memory_mib: int, deadline: float,
-            cgroups: dict[str, Path]) -> dict:
+            cgroups: dict[str, Path], *, block_hash: str | None = None,
+            block_height: int | None = None) -> dict:
     expected = getattr(cgroups, "expected_identities", {})
     before = {
         role: snapshot_cgroup(path, expected.get(role))
@@ -573,9 +631,11 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
         return result
     if status == "verified_raito":
         try:
-            receipt = gateway_read.call("zk.proof.receipt", [job_id])
-            if receipt["verified_statement"]["txid"] != txid:
-                raise ValueError("receipt transaction differs from benchmark request")
+            reply = gateway_read.call("zk.proof.receipt", [job_id])
+            statement = validate_raito_receipt(
+                reply, job_id, txid, block_hash, block_height,
+                policy, record["result_sha256"]
+            )
             fetched = proof_retrieve(
                 gateway_read, job_id, record["result_sha256"],
                 record.get("result_bytes")
@@ -587,7 +647,7 @@ def run_job(gateway_read: RPC, gateway_control: RPC, artifact_id: str,
                 f"receipt or proof retrieval failed: {type(exc).__name__}"
             )
         else:
-            result["receipt"] = receipt["verified_statement"]
+            result["receipt"] = statement
             result.update(fetched)
             result["proof_verified"] = True
     return result
@@ -646,7 +706,8 @@ def main() -> None:
     artifact_id = staged["artifact"]["id"]
     results = [
         run_job(read, control, artifact_id, policy, txid, args.memory_mib,
-                args.timeout_seconds, cgroups)
+                args.timeout_seconds, cgroups,
+                block_hash=blockhash, block_height=args.height)
         for _ in range(args.runs)
     ]
     report = {"schema": "supernode_benchmark_v1", "rpc_baseline": baseline,
