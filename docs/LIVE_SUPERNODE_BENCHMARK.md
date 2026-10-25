@@ -148,10 +148,25 @@ An RPC exception's **type** is recorded without including remote error text.
 A successful terminal-state poll sets `observation_complete: true`.
 
 The `proof_verified` flag becomes true only after the gateway reports
-`verified_raito`, a typed receipt agrees with the requested TXID, and all
-downloaded proof chunks reassemble to the saved SHA-256. A receipt mismatch,
-broken retrieval, or corrupted output yields `proof_verified: false` and a
-`verification_error` while retaining the cgroup evidence.
+`verified_raito`, a typed Raito receipt binds the submitted TXID, active block
+hash/height, selected policy digest, retained proof SHA-256, pinned verifier
+identity and statement identifier, and all downloaded proof chunks reassemble
+to the saved SHA-256. The benchmark also requires the receipt response to
+identify the same job, explicitly report `proof_verified: true`,
+`active_chain_at_lookup: true` and `output_retained: true`. The typed
+receipt's proven-tip height must be at least the block height; the block
+height, proven tip and TX index must be unsigned 32-bit integers. Missing or
+extra typed fields, incompatible bindings, broken retrieval or changed output
+yield `proof_verified: false` and a `verification_error` while retaining
+the cgroup evidence.
+
+These are **independent consistency checks of the authenticated gateway
+response**. The benchmark relies on the gateway's pinned STARK verifier for
+cryptographic acceptance and its Bitcoin Core connection for the reported
+active-chain check. This report does not independently revalidate Bitcoin
+consensus or establish the operator's verifier/process identities. The
+benchmark requires explicit block hash and height context before promoting
+a verified result.
 
 **Bounded proof retrieval:** The reporter enforces the pinned verifier
 broker's **16 MiB compressed-proof limit**. It requests **64 KiB** chunks
