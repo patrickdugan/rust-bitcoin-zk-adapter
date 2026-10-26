@@ -160,3 +160,42 @@ needs a machine with **≥128 GB RAM**. Rough cost: 1–2 days on a 32–64 core
 2. Pursue option A (ask the Raito maintainers for a retained `recent_proof`).
 3. If C is wanted, provision a ≥128 GB machine and re-run C0 with two
    batches to measure the recursive step before committing to the full chain.
+
+## C0 with swap (2026-10-26 23:40 UTC, `zk`, Raito `48c237a` tools as above)
+
+**Setup changes since the first run:**
+
+- Bitcoin Core had been removed from `zk`, and Raito's documented public RPC
+  (`bitcoin-mainnet.public.blastapi.io`) now answers "Blast API is no longer
+  available". So the bridge read headers 0–2100 from a minimal Core-RPC
+  stand-in (`getblockcount`, `getblockhash`, `getblockheader`). The stand-in
+  serves the genuine mainnet headers from rust-bitcoin's `zk` fixtures; it
+  checks their hash links and the genesis hash at startup.
+- The bridge's real flag is `--db-path` (its README still says
+  `--mmr-db-path`). Its JSON-RPC client rejects responses carrying
+  `"error": null`.
+- `litecoind-main` was stopped for the run and restarted afterwards.
+- Each batch ran as a transient unit with `MemoryMax=29G`,
+  `MemorySwapMax=16G`, using `raito-assumevalid prove --total-blocks 1
+  --step-size 1`.
+
+| Batch | Cairo steps | Result | Time | Peak |
+| --- | --- | --- | --- | --- |
+| 0→1 (from genesis, no recursion) | 6,242,367 | **Proved and self-verified** (`proof.json` 4,917,371 B, SHA-256 `e910eb99…ccff`) | 136 s total (VM 8 s, adapt 2.5 s, prove 126 s) | RSS 30.4 GB plus ~4.7 GB swap |
+| 1→2 (verifies batch 0→1 in Cairo) | **25,413,480** | **OOM-killed** at 29 GiB RAM + 16 GiB swap | VM 19 s, adapt 9.6 s, killed ~2 min into proving | ≥ 45 GiB |
+
+**What this shows:**
+
+- Recursion multiplies the per-proof floor about 4×. Verifying the previous
+  STARK costs about 19.2M Cairo steps.
+- With the first batch at ~35 GB for 6.2M steps, a recursive batch at ~25M
+  steps needs very roughly 100–140 GB. That is consistent with the earlier
+  "≥128 GB" requirement.
+- **Option C stays BLOCKED on `zk`.**
+- The non-recursive genesis proof does now fit with swap. It is a genuine
+  Raito `assumevalid` chain-state proof for block 1, but not a compressed SPV
+  proof of a transaction, so it does not count toward the PR #1 positive
+  gate.
+
+Artifacts on `zk`: `~/c1` (logs, memory samples, both batch directories),
+`~/hdrcore.py` (the stand-in), `~/zk_c1.sh` (the run script).
