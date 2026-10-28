@@ -509,17 +509,78 @@ pub async fn bind_active_chain(
             let block = core
                 .call("getblockheader", json!([r.block_hash, true]))
                 .await?;
+            let unspent = unspent_at_lookup(core, r).await?;
             Ok(json!({
                 "statement_kind":"sp1_btc_payment_v1",
                 "proof_verified":true,
                 "active_chain_at_lookup":true,
                 "core_confirmations":block["confirmations"],
+                "unspent_at_lookup":unspent,
+                "unspent_source":"bitcoin_core_gettxout_including_mempool",
                 "verified_statement":r,
-                "not_claimed":["the output is unspent",
+                "not_claimed":["unspentness is proven (it is Bitcoin Core's view at lookup)",
                                "program keys are audited (they are pinned candidates)"]
             }))
         }
     }
+}
+
+/// Bitcoin Core's view of the proven output. A spend in the mempool counts as
+/// spent. When the output is unspent, its value and script must equal the
+/// proven ones, or Core and the proof disagree.
+async fn unspent_at_lookup(core: &CoreRpc, r: &PaymentReceipt) -> Result<bool, RpcError> {
+    let out = core.call("gettxout", json!([r.txid, r.vout, true])).await?;
+    if out.is_null() {
+        return Ok(false);
+    }
+    let sats = out["value"]
+        .as_f64()
+        .map(|btc| (btc * 100_000_000.0).round() as u64);
+    let script = out["scriptPubKey"]["hex"]
+        .as_str()
+        .and_then(|h| hex::decode(h).ok())
+        .map(|s| sha_hex(&s));
+    if sats != Some(r.value_sats) || script.as_deref() != Some(r.script_sha256.as_str()) {
+        return Err(RpcError::new(
+            -32054,
+            "Bitcoin Core's unspent output differs from the proven one",
+        ));
+    }
+    Ok(true)
+}
+
+/// Sum several verified payment receipts to one script: everything proven
+/// received, and the part Core reports unspent now. This is a lower bound on
+/// the script's balance; no proof shows that other outputs do not exist.
+pub fn proven_balance(entries: &[(PaymentReceipt, bool)]) -> Result<Value, String> {
+    let first = entries.first().ok_or("no payment proofs")?;
+    let script = &first.0.script_sha256;
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut received, mut unspent) = (0u64, 0u64);
+    for (r, is_unspent) in entries {
+        if &r.script_sha256 != script {
+            return Err("payment proofs pay different scripts".into());
+        }
+        if !seen.insert((r.txid.clone(), r.vout)) {
+            return Err("duplicate outpoint".into());
+        }
+        received = received.checked_add(r.value_sats).ok_or("value overflow")?;
+        if *is_unspent {
+            unspent += r.value_sats;
+        }
+    }
+    Ok(json!({
+        "script_sha256":script,
+        "proven_outputs":entries.len(),
+        "proven_received_sats":received,
+        "proven_and_unspent_at_lookup_sats":unspent,
+        "outputs":entries.iter().map(|(r, u)| json!({
+            "txid":r.txid,"vout":r.vout,"value_sats":r.value_sats,
+            "block_height":r.block_height,"unspent_at_lookup":u
+        })).collect::<Vec<_>>(),
+        "not_claimed":["completeness: other outputs to this script may exist",
+                       "unspentness is proven (it is Bitcoin Core's view at lookup)"]
+    }))
 }
 
 #[cfg(test)]
@@ -614,6 +675,22 @@ mod tests {
         let mut lie = receipt;
         lie.confirmations = 12;
         assert!(lie.validate(&policy, PAYMENT_BUNDLE).is_err());
+    }
+
+    #[test]
+    fn balance_is_a_lower_bound_over_one_script() {
+        let r: PaymentReceipt = serde_json::from_str(PAYMENT_RECEIPT).unwrap();
+        let mut second = r.clone();
+        second.vout = 1;
+        second.value_sats = 5;
+        let b = proven_balance(&[(r.clone(), true), (second.clone(), false)]).unwrap();
+        assert_eq!(b["proven_received_sats"], 2_010_005);
+        assert_eq!(b["proven_and_unspent_at_lookup_sats"], 2_010_000);
+        let mut other_script = second;
+        other_script.script_sha256 = "00".repeat(32);
+        assert!(proven_balance(&[(r.clone(), true), (other_script, true)]).is_err());
+        assert!(proven_balance(&[(r.clone(), true), (r, true)]).is_err());
+        assert!(proven_balance(&[]).is_err());
     }
 
     #[test]

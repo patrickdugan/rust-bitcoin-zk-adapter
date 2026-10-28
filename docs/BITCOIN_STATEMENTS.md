@@ -37,6 +37,42 @@ A receipt is returned only when all of the following hold:
    - For payments, the block hash must also match, and so must
      `expected_txid` and `expected_vout` when given.
 
+**Unspentness at lookup.** For a payment, the gateway also asks Core for
+`gettxout(txid, vout, include_mempool=true)` and reports it as
+`unspent_at_lookup`:
+
+- When Core reports the output unspent, its value and script must equal the
+  proven ones, or the request fails (-32054).
+- This is Core's view, not a proof.
+
+## Balance (lower bound)
+
+```
+zk.statement.balance [[bundle_hex, ...]]   # 1–32 payment bundles to one script
+```
+
+**What it does.** Each bundle is verified and bound as above. The result
+gives:
+
+- `proven_received_sats`;
+- `proven_and_unspent_at_lookup_sats`;
+- one entry per output.
+
+**Rejected inputs.** Mixed scripts and duplicate outpoints are refused.
+
+**Why it is only a lower bound.** Inclusion proofs cannot show that no
+*other* outputs to the script exist. Proving unspentness in zero knowledge
+would mean checking every input of every later block against an accumulator
+(Utreexo-style). That is block-validation cost, the regime where Raito's
+recursive batch needed more than 45 GiB. The cheap route is therefore:
+
+- proven inclusion;
+- Core-attested unspentness;
+- an explicit not-claimed list.
+
+A full balance proof would need a UTXO-set commitment proven per block. That
+is out of reach on the measured hardware; it is listed under "Next".
+
 Error codes:
 
 | Code | Meaning |
@@ -45,6 +81,7 @@ Error codes:
 | -32050 | not on the active chain |
 | -32051 | chainwork mismatch |
 | -32052 | wrong expected output |
+| -32054 | Core's unspent output differs from the proven one |
 | -32002 | control token required |
 
 ## Operator configuration
@@ -90,6 +127,9 @@ btc-header-fold pack OUT bundle.nhc1
   the 8-vCPU `zk` VPS.
 - `--start` must be an operator-pinned checkpoint. The receipt reports its
   `checkpoint_state_sha256`.
+- For a checkpoint at any height, pass `--checkpoint-state FILE` (the
+  128-byte SP1 chain start state) and `--headers-txt FILE` (lines of
+  `height hex`).
 
 **Payment.** Use the SP1 host bins on Raito-Scrypt `research/bitcoin-bitvm`:
 
@@ -113,6 +153,17 @@ Then run `btc-pay-verify pack groth16.proof.hex public_values.hex bundle.bpg1`.
 - Covers heights 1,001–1,100 from checkpoint 1,000.
 - End tip `000000009cd3…eb4b`, chainwork `0x44d044d044d`.
 
+**`integrations/nova-header-chain/fixtures/tip959994.nhc1`**
+
+- Covers 1,000 current-difficulty headers, 958,994 → 959,994.
+- Built on a laptop: 76 s to fold, 27 s to compress, 0.076 s per header.
+- Same verifier key; 842k R1CS constraints per 10-header step.
+- Checkpoint: the SP1 start state at 958,986
+  (`fixtures/checkpoint_958986.state`, chainwork from Core), advanced
+  natively by 8 headers.
+- Its end tip hash and chainwork equal the payment proof's tip. The gateway
+  test `modern_header_chain_proof_ends_at_the_payment_proof_tip` checks this.
+
 **`integrations/sp1-btc-payment/fixtures/payment.bpg1`**
 
 - tx `fd2fdd44…daa6`, output 0, value 2,010,000 sats.
@@ -123,9 +174,33 @@ Then run `btc-pay-verify pack groth16.proof.hex public_values.hex bundle.bpg1`.
 ## Not claimed
 
 - **Checkpoints.** They are operator-pinned, not proven from genesis.
-- **Unspentness.** Inclusion only; use Core `gettxout` for current state.
+- **Unspentness.** Proofs show inclusion only. `unspent_at_lookup` is
+  Bitcoin Core's view.
+- **Balance completeness.** `zk.statement.balance` is a lower bound.
 - **Best chain and future time.** Best-chain selection and the future-time
   rule are outside the proof; Core's chainwork equality stands in for them at
   lookup.
 - **Key audit.** Program keys are pinned candidates, not audited releases.
 - **Post-quantum soundness.** Nova uses Pallas/Vesta; Groth16 uses BN254.
+
+## Next
+
+**Current-tip header proofs.** Extend Nova proofs to the current tip from a
+recent pinned checkpoint:
+
+- 1,000 headers fold in about 100–150 s at 1.4 GB, which fits a laptop.
+- A long-running prover that keeps its `RecursiveSNARK` could follow the
+  tip one 10-header step at a time. This is not built yet.
+
+**Linking header and payment proofs.** Today the gateway checks both kinds
+against Core separately. A test shows that they agree on the tip (958,994 →
+959,994), but the gateway does not require it.
+
+- Next, accept a payment only under a pinned or just-verified Nova end state.
+- Or make the payment program accept a Nova chain proof instead of the SP1
+  node proof. That would replace 18–22 GB stages with 1.4 GB folding for the
+  chain part.
+
+**Full balances.** A UTXO-set commitment (for example, Utreexo roots) proven
+per block, so that non-spending and completeness can be shown. The cost is
+roughly full block validation; this is research, not a next step.

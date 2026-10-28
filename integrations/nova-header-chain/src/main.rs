@@ -2,6 +2,8 @@
 //! IPA, no trusted setup), verify, and optionally compress with Spartan.
 //!
 //! btc-header-fold --start H --k K --steps N [--compress [--save DIR]] [--corrupt-nonce I]
+//!   [--checkpoint-state FILE --headers-txt FILE]  (any-height checkpoint; default: early
+//!                                                  mainnet headers under --data)
 //! btc-header-fold verify DIR [--vk VK]        (DIR/proof.bin, z0.bin, steps.txt, k.txt)
 //! btc-header-fold verify-bundle FILE [--vk VK] (an NHC1 bundle, see `pack`)
 //!   Both print a btc_header_chain_v1 receipt as JSON; exit 1 if rejected.
@@ -38,6 +40,41 @@ fn hwm_mib() -> String {
     })
     .map(|kb| format!("{}", kb / 1024))
     .unwrap_or_else(|| "n/a".into())
+}
+
+/// A checkpoint at any height, from the 128-byte start state used by the SP1
+/// chain programs: height u32 | hash 32 | chainwork 32 LE | nBits u32 |
+/// time(height) u32 | time(epoch start) u32 | 11 | 11 timestamps u32
+/// (oldest first). The verifier binds it through checkpoint_state_sha256
+/// and Bitcoin Core checks its hash and chainwork.
+fn sp1_checkpoint(b: &[u8]) -> State {
+  assert!(b.len() == 128 && b[80] == 11, "not an SP1 chain start state");
+  let u = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+  let mut ts = [0u32; 11];
+  for (i, t) in ts.iter_mut().enumerate() {
+    *t = u(81 + 4 * i);
+  }
+  assert_eq!(ts[10], u(72), "last timestamp must be the checkpoint's");
+  State {
+    height: u(0),
+    prev: b[4..36].try_into().unwrap(),
+    chainwork: BigUint::from_bytes_le(&b[36..68]),
+    epoch_bits: u(68),
+    epoch_start: u(76),
+    ts,
+  }
+}
+
+/// "height hex" lines, each header hash-linked to its predecessor if present.
+fn load_headers_txt(path: &std::path::Path) -> std::collections::BTreeMap<u32, Header> {
+  let mut hs = std::collections::BTreeMap::new();
+  for line in std::fs::read_to_string(path).expect("headers txt").lines().filter(|l| !l.trim().is_empty()) {
+    let mut it = line.split_whitespace();
+    let h: u32 = it.next().unwrap().parse().unwrap();
+    let header: Header = hex::decode(it.next().unwrap()).unwrap().try_into().unwrap();
+    hs.insert(h, header);
+  }
+  hs
 }
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -199,8 +236,23 @@ fn main() {
   let corrupt: Option<u32> = arg(&args, "--corrupt-nonce").map(|v| v.parse().unwrap());
   let data = std::path::PathBuf::from(arg(&args, "--data").unwrap_or_else(|| "data".into()));
 
-  let hs = load_headers(&data);
-  let cp = State::checkpoint(start, &hs, early_chainwork(start));
+  let (hs, cp) = match (arg(&args, "--checkpoint-state"), arg(&args, "--headers-txt")) {
+    (Some(state), Some(txt)) => {
+      let hs = load_headers_txt(std::path::Path::new(&txt));
+      let mut cp = sp1_checkpoint(&std::fs::read(state).expect("checkpoint state"));
+      // Advance natively from the file's checkpoint to --start.
+      while cp.height < start {
+        cp = cp.apply(&hs[&(cp.height + 1)]).expect("headers before --start must be valid");
+      }
+      assert_eq!(cp.height, start, "--start precedes the checkpoint state");
+      (hs, cp)
+    }
+    _ => {
+      let hs = load_headers(&data);
+      let cp = State::checkpoint(start, &hs, early_chainwork(start));
+      (hs, cp)
+    }
+  };
   let mut state = cp.clone();
   let mut circuits = Vec::new();
   for s in 0..steps {

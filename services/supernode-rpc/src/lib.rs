@@ -260,7 +260,11 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
 pub fn requires_control_token(method: &str) -> bool {
     matches!(
         method,
-        "zk.artifact.put" | "zk.proof.submit" | "zk.proof.verify" | "zk.statement.verify"
+        "zk.artifact.put"
+            | "zk.proof.submit"
+            | "zk.proof.verify"
+            | "zk.statement.verify"
+            | "zk.statement.balance"
     )
 }
 
@@ -401,6 +405,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
         "zk.proof.receipt" => proof_job_receipt(gateway, &params).await,
         "zk.proof.get" => proof_job_get(gateway, &params).await,
         "zk.statement.verify" => verify_statement(gateway, &params).await,
+        "zk.statement.balance" => statement_balance(gateway, &params).await,
         "zk.chain.refresh" => gateway
             .chain
             .reconcile(core)
@@ -948,6 +953,40 @@ async fn verify_statement(gateway: &Gateway, params: &Value) -> Result<Value, Rp
         expected_vout,
     )
     .await
+}
+
+/// Most payment bundles one balance request may carry (each is 709 bytes).
+const MAX_BALANCE_PROOFS: usize = 32;
+
+/// `[[bundle_hex, ...]]`: verify payment proofs to one script, bind each to
+/// Core's active chain, and report the proven-received and
+/// proven-and-unspent totals (a lower bound on the script's balance).
+async fn statement_balance(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
+    let verifiers = gateway
+        .statements
+        .as_ref()
+        .ok_or_else(|| RpcError::new(-32601, "statement verifiers not configured"))?;
+    let bundles = params
+        .as_array()
+        .filter(|a| a.len() == 1)
+        .and_then(|a| a[0].as_array())
+        .filter(|b| !b.is_empty() && b.len() <= MAX_BALANCE_PROOFS)
+        .ok_or_else(|| RpcError::new(-32602, "expected [[bundle_hex, ...]] (1 to 32 bundles)"))?;
+    let mut entries = Vec::with_capacity(bundles.len());
+    for bundle in bundles {
+        let bytes = hex::decode(bundle.as_str().unwrap_or(""))
+            .map_err(|_| RpcError::new(-32602, "invalid bundle hexadecimal"))?;
+        let receipt = verifiers
+            .verify(statements::StatementKind::Sp1Payment, &bytes)
+            .await
+            .map_err(|e| RpcError::new(-32053, e))?;
+        let bound = statements::bind_active_chain(&gateway.core, &receipt, None, None).await?;
+        let statements::StatementReceipt::Sp1Payment(payment) = receipt else {
+            return Err(RpcError::new(-32053, "not a payment receipt"));
+        };
+        entries.push((payment, bound["unspent_at_lookup"] == true));
+    }
+    statements::proven_balance(&entries).map_err(|e| RpcError::new(-32602, e))
 }
 
 async fn proof_job_status(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
