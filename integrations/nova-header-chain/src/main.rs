@@ -9,6 +9,8 @@
 //!   Both print a btc_header_chain_v1 receipt as JSON; exit 1 if rejected.
 //! btc-header-fold pack DIR OUT                 (DIR as written by --save -> NHC1 bundle)
 //! btc-header-fold vk-export K OUT              (deterministic verifier key for fold width K)
+//! btc-header-fold pack-spv OUT VOUT TO_BLOCK.nhc1 TO_TIP.nhc1|- MERKLEBLOCK_HEX TX_HEX
+//!                                              (NSP1 payment bundle for zk.statement.verify)
 use nova_header_chain::native::{early_chainwork, load_headers, Header, State};
 use nova_header_chain::HeaderStep;
 use nova_snark::{
@@ -174,8 +176,8 @@ fn verify(proof_b: Vec<u8>, z0_b: Vec<u8>, steps: usize, k: usize, vk_path: Opti
   match res {
     Ok(zn) => {
       println!(
-        "{{\"statement\":\"btc_header_chain_v1\",\"verifier\":\"nova-snark 0.76.0 pallas/vesta ipa, spartan compressed\",\"vk_sha256\":\"{}\",\"proof_sha256\":\"{}\",\"checkpoint_state_sha256\":\"{}\",\"checkpoint\":{{\"height\":{},\"tip_hash\":\"{}\",\"chainwork\":\"{}\"}},\"end\":{{\"height\":{},\"tip_hash\":\"{}\",\"chainwork\":\"{}\"}},\"headers\":{},\"verify_seconds\":{:.3},\"verified\":true}}",
-        sha(&vk_b), sha(&proof_b), sha(&z0_b),
+        "{{\"statement\":\"btc_header_chain_v1\",\"verifier\":\"nova-snark 0.76.0 pallas/vesta ipa, spartan compressed\",\"vk_sha256\":\"{}\",\"proof_sha256\":\"{}\",\"checkpoint_state_sha256\":\"{}\",\"end_state_sha256\":\"{}\",\"checkpoint\":{{\"height\":{},\"tip_hash\":\"{}\",\"chainwork\":\"{}\"}},\"end\":{{\"height\":{},\"tip_hash\":\"{}\",\"chainwork\":\"{}\"}},\"headers\":{},\"verify_seconds\":{:.3},\"verified\":true}}",
+        sha(&vk_b), sha(&proof_b), sha(&z0_b), sha(&z_bytes(&zn)),
         big(&z0[0]), tip_display(&z0[1], &z0[2]), hex_be(&big(&z0[3])),
         big(&zn[0]), tip_display(&zn[1], &zn[2]), hex_be(&big(&zn[3])),
         steps * k, secs
@@ -225,6 +227,21 @@ fn main() {
       let b = rebuild_vk(k);
       std::fs::write(args.get(3).expect("vk-export K OUT"), &b).unwrap();
       println!("vk_sha256={}", hex::encode(Sha256::digest(&b)));
+      return;
+    }
+    Some("pack-spv") => {
+      // pack-spv OUT VOUT TO_BLOCK.nhc1 TO_TIP.nhc1|- MERKLEBLOCK_HEX_FILE TX_HEX_FILE
+      let a = |i: usize| args.get(i).expect("pack-spv OUT VOUT TO_BLOCK TO_TIP|- MERKLEBLOCK_HEX TX_HEX");
+      let hex_file = |p: &str| hex::decode(std::fs::read_to_string(p).unwrap().trim()).unwrap();
+      let to_tip = if a(5) == "-" { Vec::new() } else { std::fs::read(a(5)).unwrap() };
+      let mut b = b"NSP1".to_vec();
+      b.extend(a(3).parse::<u32>().unwrap().to_le_bytes());
+      for part in [std::fs::read(a(4)).unwrap(), to_tip, hex_file(a(6)), hex_file(a(7))] {
+        b.extend((part.len() as u32).to_le_bytes());
+        b.extend(part);
+      }
+      std::fs::write(a(2), &b).unwrap();
+      println!("nsp1_bytes={}", b.len());
       return;
     }
     _ => {}

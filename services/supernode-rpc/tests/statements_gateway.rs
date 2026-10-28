@@ -375,3 +375,145 @@ async fn modern_header_chain_proof_ends_at_the_payment_proof_tip() {
     };
     assert_eq!(work(&h["end"]["chainwork"]), work(&p["tip_chainwork"]));
 }
+
+/// The SP1-free payment path: two chained Nova proofs (958,994 -> 959,984,
+/// then 959,984 -> 959,994) and a plain SPV Merkle branch for tx fd2fdd44 in
+/// block 959,984. Everything here proves on a laptop in 1.4 GB.
+#[tokio::test]
+async fn nova_spv_payment_is_verified_chained_and_bound_to_core() {
+    let (Some(program), Ok(vk)) = (
+        pinned("SUPERNODE_TEST_NOVA_VERIFIER"),
+        std::env::var("SUPERNODE_TEST_NOVA_VK"),
+    ) else {
+        eprintln!("skipped: SUPERNODE_TEST_NOVA_VERIFIER / SUPERNODE_TEST_NOVA_VK unset");
+        return;
+    };
+    let policy = NovaPolicy {
+        program,
+        vk_path: std::fs::canonicalize(vk).unwrap(),
+        vk_sha256: "e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698".into(),
+        checkpoints: vec![
+            "f6db0a7fc59782567f6e49842cb21d62d4d493a97a13d65ddfca0f0a8503efe2".into(),
+        ],
+    };
+    let chain = payment_chain();
+    {
+        let mut c = chain.lock().unwrap();
+        c.insert(
+            958_994,
+            (
+                "000000000000000000015e344d926094a7a364ff0ec2982fad6004a5584821ce".into(),
+                "0x1395bd71adc43a240a19aeb6e".into(),
+            ),
+        );
+        c.get_mut(&959_984).unwrap().1 = "0x13b19e60158560924b29346e7".into();
+    }
+    let url = start(chain.clone(), unspent_txout(), Some(policy), None).await;
+    let bundle = fixture("nova-header-chain/fixtures/payment959984.nsp1");
+
+    let ok = call(
+        &url,
+        CONTROL,
+        json!(["nova_spv_payment_v1", bundle, TXID, 0]),
+    )
+    .await;
+    let r = &ok["result"];
+    assert_eq!(r["proof_verified"], true, "{ok}");
+    assert_eq!(r["unspent_at_lookup"], true);
+    let s = &r["verified_statement"];
+    assert_eq!(s["block_height"], 959_984);
+    assert_eq!(s["tip_height"], 959_994);
+    assert_eq!(s["confirmations"], 11);
+    assert_eq!(s["value_sats"], 2_010_000);
+    assert_eq!(
+        s["script_sha256"],
+        "b05800113707606313240b35c1558aae55174be81765bcbfbff133961797a1b9"
+    );
+
+    // The same output counts once in a mixed-kind balance.
+    let balance = call_method(
+        &url,
+        "zk.statement.balance",
+        json!([[["nova_spv_payment_v1", bundle]]]),
+    )
+    .await;
+    assert_eq!(
+        balance["result"]["proven_and_unspent_at_lookup_sats"], 2_010_000,
+        "{balance}"
+    );
+
+    let raw = hex::decode(&bundle).unwrap();
+    let len = |at: usize| u32::from_le_bytes(raw[at..at + 4].try_into().unwrap()) as usize;
+    let b_at = 12 + len(8);
+    let (b_len, m_at) = (len(b_at), b_at + 4 + len(b_at));
+    let t_at = m_at + 4 + len(m_at);
+
+    let other_vout = call(
+        &url,
+        CONTROL,
+        json!(["nova_spv_payment_v1", bundle, TXID, 1]),
+    )
+    .await;
+    assert_eq!(other_vout["error"]["code"], -32052, "{other_vout}");
+
+    // An output index the tx lacks; a flipped tx byte (the Merkle branch no longer
+    // binds it); a flipped Merkle-header byte; a flipped byte in the second
+    // proof.
+    let mut vout = raw.clone();
+    vout[4] = 1;
+    let mut tx = raw.clone();
+    tx[t_at + 4 + 10] ^= 1;
+    let mut header = raw.clone();
+    header[m_at + 4 + 40] ^= 1;
+    let mut second = raw.clone();
+    second[b_at + 4 + b_len - 10] ^= 1;
+    for (name, bad, code) in [
+        ("vout out of range", vout, -32053),
+        ("tx", tx, -32053),
+        ("header", header, -32053),
+        ("second proof", second, -32053),
+    ] {
+        let res = call(
+            &url,
+            CONTROL,
+            json!(["nova_spv_payment_v1", hex::encode(bad), TXID, 0]),
+        )
+        .await;
+        assert_eq!(res["error"]["code"], code, "{name}: {res}");
+    }
+
+    // The second proof must continue the first. Swap in a valid proof that
+    // starts at the pinned checkpoint (958,994) instead of at block 959,984:
+    // only the continuity rule can refuse it.
+    let other = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../integrations/nova-header-chain/fixtures/tip959994.nhc1"),
+    )
+    .unwrap();
+    let spliced = [
+        &raw[..b_at],
+        &(other.len() as u32).to_le_bytes()[..],
+        &other,
+        &raw[m_at..],
+    ]
+    .concat();
+    let res = call(
+        &url,
+        CONTROL,
+        json!(["nova_spv_payment_v1", hex::encode(spliced)]),
+    )
+    .await;
+    assert_eq!(res["error"]["code"], -32053, "{res}");
+    assert!(
+        res["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("checkpoint"),
+        "{res}"
+    );
+
+    // Core reorganizes the payment block away.
+    chain.lock().unwrap().get_mut(&959_984).unwrap().0 = "33".repeat(32);
+    let reorg = call(&url, CONTROL, json!(["nova_spv_payment_v1", bundle])).await;
+    assert_eq!(reorg["error"]["code"], -32050, "{reorg}");
+}

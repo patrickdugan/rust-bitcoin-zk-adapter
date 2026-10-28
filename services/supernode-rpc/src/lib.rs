@@ -958,7 +958,7 @@ async fn verify_statement(gateway: &Gateway, params: &Value) -> Result<Value, Rp
 /// Most payment bundles one balance request may carry (each is 709 bytes).
 const MAX_BALANCE_PROOFS: usize = 32;
 
-/// `[[bundle_hex, ...]]`: verify payment proofs to one script, bind each to
+/// `[[bundle_hex | [kind, bundle_hex], ...]]`: verify payment proofs to one script, bind each to
 /// Core's active chain, and report the proven-received and
 /// proven-and-unspent totals (a lower bound on the script's balance).
 async fn statement_balance(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
@@ -971,20 +971,35 @@ async fn statement_balance(gateway: &Gateway, params: &Value) -> Result<Value, R
         .filter(|a| a.len() == 1)
         .and_then(|a| a[0].as_array())
         .filter(|b| !b.is_empty() && b.len() <= MAX_BALANCE_PROOFS)
-        .ok_or_else(|| RpcError::new(-32602, "expected [[bundle_hex, ...]] (1 to 32 bundles)"))?;
+        .ok_or_else(|| {
+            RpcError::new(
+                -32602,
+                "expected [[bundle_hex | [kind, bundle_hex], ...]] (1 to 32 bundles)",
+            )
+        })?;
     let mut entries = Vec::with_capacity(bundles.len());
-    for bundle in bundles {
-        let bytes = hex::decode(bundle.as_str().unwrap_or(""))
-            .map_err(|_| RpcError::new(-32602, "invalid bundle hexadecimal"))?;
+    for entry in bundles {
+        // A bare string is an SP1 payment bundle; [kind, hex] names the kind.
+        let (kind, bundle) = match entry {
+            Value::String(hex) => (statements::StatementKind::Sp1Payment, hex.as_str()),
+            Value::Array(pair) if pair.len() == 2 => (
+                statements::StatementKind::from_name(pair[0].as_str().unwrap_or(""))
+                    .map_err(|e| RpcError::new(-32602, e))?,
+                pair[1].as_str().unwrap_or(""),
+            ),
+            _ => return Err(RpcError::new(-32602, "invalid balance entry")),
+        };
+        let bytes =
+            hex::decode(bundle).map_err(|_| RpcError::new(-32602, "invalid bundle hexadecimal"))?;
         let receipt = verifiers
-            .verify(statements::StatementKind::Sp1Payment, &bytes)
+            .verify(kind, &bytes)
             .await
             .map_err(|e| RpcError::new(-32053, e))?;
+        let output = receipt
+            .proven_output()
+            .ok_or_else(|| RpcError::new(-32602, "balance entries must be payment proofs"))?;
         let bound = statements::bind_active_chain(&gateway.core, &receipt, None, None).await?;
-        let statements::StatementReceipt::Sp1Payment(payment) = receipt else {
-            return Err(RpcError::new(-32053, "not a payment receipt"));
-        };
-        entries.push((payment, bound["unspent_at_lookup"] == true));
+        entries.push((output, bound["unspent_at_lookup"] == true));
     }
     statements::proven_balance(&entries).map_err(|e| RpcError::new(-32602, e))
 }

@@ -11,6 +11,12 @@
 >
 > Both verifiers live in `integrations/`, with real mainnet fixtures, and run
 > end to end in CI (`.github/workflows/bitcoin-statements.yml`).
+>
+> Added the same night:
+> - `nova_spv_payment_v1`: a payment proved with no SP1 at all, from two
+>   chained Nova proofs plus SPV, in about 3 laptop-minutes;
+> - Core-attested `unspent_at_lookup`;
+> - a lower-bound `zk.statement.balance`.
 
 Goal: header-chain and payment proofs that run on commodity hardware, plugged
 into the existing dispatcher. Each backend follows the dispatcher's pattern:

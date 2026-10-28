@@ -6,7 +6,11 @@
 //! - `nova_header_chain_v1`: an NHC1 bundle (about 13.5 KB) proving a
 //!   header chain from an operator-pinned checkpoint;
 //! - `sp1_btc_payment_v1`: a BPG1 bundle (709 bytes) proving a payment
-//!   output's inclusion under a proven header chain.
+//!   output's inclusion under a proven header chain;
+//! - `nova_spv_payment_v1`: an NSP1 bundle with two chained Nova proofs
+//!   (pinned checkpoint to block B, then B to the tip) plus a plain SPV
+//!   Merkle branch and the raw transaction. Every part is cheap to prove
+//!   (1.4 GB); the Merkle part needs no proof system.
 //!
 //! A receipt is returned only when all of the following hold:
 //! 1. the pinned verifier executable accepts the bundle;
@@ -34,6 +38,9 @@ pub const PAYMENT_VERIFIER: &str = "sp1-verifier 6.9.0 groth16 bn254";
 const NHC1_HEADER_BYTES: usize = 12 + 17 * 32;
 pub const MAX_NOVA_BUNDLE_BYTES: usize = 24 * 1024;
 pub const PAYMENT_BUNDLE_BYTES: usize = 709;
+pub const SPV_PAYMENT_STATEMENT: &str = "btc_nova_spv_payment_v1";
+pub const MAX_SPV_BUNDLE_BYTES: usize = 30 * 1024;
+const MAX_SPV_TX_BYTES: usize = 4096;
 const MAX_RECEIPT_BYTES: u64 = 8192;
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -41,6 +48,7 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
 pub enum StatementKind {
     NovaHeaders,
     Sp1Payment,
+    NovaSpvPayment,
 }
 
 impl StatementKind {
@@ -48,6 +56,7 @@ impl StatementKind {
         match name {
             "nova_header_chain_v1" => Ok(Self::NovaHeaders),
             "sp1_btc_payment_v1" => Ok(Self::Sp1Payment),
+            "nova_spv_payment_v1" => Ok(Self::NovaSpvPayment),
             _ => Err("unsupported statement kind".into()),
         }
     }
@@ -124,6 +133,9 @@ pub struct NovaHeaderReceipt {
     pub vk_sha256: String,
     pub proof_sha256: String,
     pub checkpoint_state_sha256: String,
+    /// SHA-256 of the 17 end-state field elements: a later proof starting
+    /// here has this as its `checkpoint_state_sha256`.
+    pub end_state_sha256: String,
     pub checkpoint: ChainPoint,
     pub end: ChainPoint,
     pub headers: u64,
@@ -158,25 +170,86 @@ pub struct PaymentReceipt {
     pub verified: bool,
 }
 
+/// A payment proven by chained Nova header proofs plus an SPV Merkle branch.
+/// Assembled by the gateway from two verifier receipts and its own checks.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SpvPaymentReceipt {
+    pub statement: String,
+    pub checkpoint_state_sha256: String,
+    pub chain_to_block: NovaHeaderReceipt,
+    pub chain_to_tip: Option<NovaHeaderReceipt>,
+    pub block_height: u32,
+    pub block_hash: String,
+    pub tip_height: u32,
+    pub tip_hash: String,
+    pub tip_chainwork: String,
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub script_sha256: String,
+    pub confirmations: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatementReceipt {
     NovaHeaders(NovaHeaderReceipt),
     Sp1Payment(PaymentReceipt),
+    NovaSpvPayment(Box<SpvPaymentReceipt>),
+}
+
+/// One proven output, whichever payment kind proved it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProvenOutput {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sats: u64,
+    pub script_sha256: String,
+    pub block_height: u32,
+}
+
+impl StatementReceipt {
+    pub fn proven_output(&self) -> Option<ProvenOutput> {
+        match self {
+            Self::NovaHeaders(_) => None,
+            Self::Sp1Payment(r) => Some(ProvenOutput {
+                txid: r.txid.clone(),
+                vout: r.vout,
+                value_sats: r.value_sats,
+                script_sha256: r.script_sha256.clone(),
+                block_height: r.block_height,
+            }),
+            Self::NovaSpvPayment(r) => Some(ProvenOutput {
+                txid: r.txid.clone(),
+                vout: r.vout,
+                value_sats: r.value_sats,
+                script_sha256: r.script_sha256.clone(),
+                block_height: r.block_height,
+            }),
+        }
+    }
 }
 
 impl NovaHeaderReceipt {
-    pub fn validate(&self, policy: &NovaPolicy, bundle: &[u8]) -> Result<(), String> {
+    /// `checkpoints` are the accepted start states: the operator's pins, or
+    /// the end state of the proof this one continues.
+    pub fn validate(
+        &self,
+        vk_sha256: &str,
+        checkpoints: &[String],
+        bundle: &[u8],
+    ) -> Result<(), String> {
         let headers_ok = u64::from(self.end.height)
             .checked_sub(u64::from(self.checkpoint.height))
             .is_some_and(|n| n == self.headers && n > 0);
         if !self.verified
             || self.statement != NOVA_STATEMENT
             || self.verifier != NOVA_VERIFIER
-            || self.vk_sha256 != policy.vk_sha256
+            || self.vk_sha256 != vk_sha256
             || bundle.len() <= NHC1_HEADER_BYTES
             || self.proof_sha256 != sha_hex(&bundle[NHC1_HEADER_BYTES..])
             || self.checkpoint_state_sha256 != sha_hex(&bundle[12..NHC1_HEADER_BYTES])
-            || !policy.checkpoints.contains(&self.checkpoint_state_sha256)
+            || !checkpoints.contains(&self.checkpoint_state_sha256)
+            || !valid_hash(&self.end_state_sha256)
             || !headers_ok
             || !valid_hash(&self.checkpoint.tip_hash)
             || !valid_hash(&self.end.tip_hash)
@@ -280,6 +353,7 @@ impl StatementVerifiers {
                 "vk_sha256":p.vk_sha256, "pinned_checkpoints":p.checkpoints.len()
             })),
             "sp1_btc_payment_v1": self.payment.as_ref().map(|p| json!({"pay_vkey":p.pay_vkey})),
+            "nova_spv_payment_v1": self.nova.is_some(),
             "max_nova_bundle_bytes":MAX_NOVA_BUNDLE_BYTES,
             "payment_bundle_bytes":PAYMENT_BUNDLE_BYTES
         })
@@ -302,25 +376,14 @@ impl StatementVerifiers {
                     .nova
                     .as_ref()
                     .ok_or("Nova verifier is not configured")?;
-                if bundle.len() > MAX_NOVA_BUNDLE_BYTES || bundle.len() <= NHC1_HEADER_BYTES {
-                    return Err("NHC1 bundle size out of range".into());
-                }
-                policy.program.validate()?;
-                let bytes = self
-                    .run(&policy.program, bundle, |path| {
-                        vec![
-                            "verify-bundle".into(),
-                            path.as_os_str().to_owned(),
-                            "--vk".into(),
-                            policy.vk_path.as_os_str().to_owned(),
-                        ]
-                    })
-                    .await?;
-                let receipt: NovaHeaderReceipt =
-                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-                receipt.validate(policy, bundle)?;
-                Ok(StatementReceipt::NovaHeaders(receipt))
+                self.verify_nova(policy, bundle, &policy.checkpoints)
+                    .await
+                    .map(StatementReceipt::NovaHeaders)
             }
+            StatementKind::NovaSpvPayment => self
+                .verify_spv(bundle)
+                .await
+                .map(|r| StatementReceipt::NovaSpvPayment(Box::new(r))),
             StatementKind::Sp1Payment => {
                 let policy = self
                     .payment
@@ -341,6 +404,95 @@ impl StatementVerifiers {
                 Ok(StatementReceipt::Sp1Payment(receipt))
             }
         }
+    }
+
+    async fn verify_nova(
+        &self,
+        policy: &NovaPolicy,
+        bundle: &[u8],
+        checkpoints: &[String],
+    ) -> Result<NovaHeaderReceipt, String> {
+        if bundle.len() > MAX_NOVA_BUNDLE_BYTES || bundle.len() <= NHC1_HEADER_BYTES {
+            return Err("NHC1 bundle size out of range".into());
+        }
+        policy.program.validate()?;
+        let bytes = self
+            .run(&policy.program, bundle, |path| {
+                vec![
+                    "verify-bundle".into(),
+                    path.as_os_str().to_owned(),
+                    "--vk".into(),
+                    policy.vk_path.as_os_str().to_owned(),
+                ]
+            })
+            .await?;
+        let receipt: NovaHeaderReceipt =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        receipt.validate(&policy.vk_sha256, checkpoints, bundle)?;
+        Ok(receipt)
+    }
+
+    /// NSP1: b"NSP1" | vout u32 | then four u32-length-prefixed parts: the
+    /// NHC1 proof from a pinned checkpoint to block B, the NHC1 proof from B
+    /// to the tip (may be empty: the tip is B), a `gettxoutproof` MerkleBlock
+    /// and the raw transaction. All integers are little-endian.
+    async fn verify_spv(&self, bundle: &[u8]) -> Result<SpvPaymentReceipt, String> {
+        use bitcoin::consensus::deserialize;
+        let policy = self
+            .nova
+            .as_ref()
+            .ok_or("Nova verifier is not configured")?;
+        let (vout, to_block, to_tip, merkle, raw_tx) = split_nsp1(bundle)?;
+        let chain_to_block = self
+            .verify_nova(policy, to_block, &policy.checkpoints)
+            .await?;
+        let chain_to_tip = if to_tip.is_empty() {
+            None
+        } else {
+            let next = [chain_to_block.end_state_sha256.clone()];
+            Some(self.verify_nova(policy, to_tip, &next).await?)
+        };
+
+        let merkle: bitcoin::MerkleBlock =
+            deserialize(merkle).map_err(|_| "MerkleBlock cannot be decoded")?;
+        if merkle.header.block_hash().to_string() != chain_to_block.end.tip_hash {
+            return Err("MerkleBlock header is not the proven block".into());
+        }
+        let tx: bitcoin::Transaction =
+            deserialize(raw_tx).map_err(|_| "transaction cannot be decoded")?;
+        // A 64-byte transaction can masquerade as an inner Merkle node.
+        if tx.base_size() == 64 {
+            return Err("64-byte transactions are refused (Merkle ambiguity)".into());
+        }
+        let txid = tx.compute_txid();
+        let (mut matches, mut positions) = (Vec::new(), Vec::new());
+        merkle
+            .extract_matches(&mut matches, &mut positions)
+            .map_err(|_| "Merkle branch does not reach the header's root")?;
+        if matches != [txid] {
+            return Err("Merkle branch does not bind exactly this transaction".into());
+        }
+        let output = tx
+            .output
+            .get(vout as usize)
+            .ok_or("output index out of range")?;
+        let tip = chain_to_tip.as_ref().unwrap_or(&chain_to_block).end.clone();
+        Ok(SpvPaymentReceipt {
+            statement: SPV_PAYMENT_STATEMENT.into(),
+            checkpoint_state_sha256: chain_to_block.checkpoint_state_sha256.clone(),
+            block_height: chain_to_block.end.height,
+            block_hash: chain_to_block.end.tip_hash.clone(),
+            tip_height: tip.height,
+            tip_hash: tip.tip_hash,
+            tip_chainwork: tip.chainwork,
+            txid: txid.to_string(),
+            vout,
+            value_sats: output.value.to_sat(),
+            script_sha256: sha_hex(output.script_pubkey.as_bytes()),
+            confirmations: tip.height - chain_to_block.end.height + 1,
+            chain_to_block,
+            chain_to_tip,
+        })
     }
 
     /// Write the bundle to a fresh file, run the verifier with stdout to a
@@ -404,6 +556,33 @@ impl StatementVerifiers {
         let _ = fs::remove_file(&output);
         result
     }
+}
+
+type Nsp1Parts<'a> = (u32, &'a [u8], &'a [u8], &'a [u8], &'a [u8]);
+
+fn split_nsp1(b: &[u8]) -> Result<Nsp1Parts<'_>, String> {
+    if b.len() > MAX_SPV_BUNDLE_BYTES || b.len() < 8 || &b[..4] != b"NSP1" {
+        return Err("not an NSP1 bundle".into());
+    }
+    let vout = u32::from_le_bytes(b[4..8].try_into().unwrap());
+    let mut rest = &b[8..];
+    let mut take = || -> Result<&[u8], String> {
+        if rest.len() < 4 {
+            return Err("truncated NSP1 bundle".into());
+        }
+        let n = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+        if rest.len() - 4 < n {
+            return Err("truncated NSP1 bundle".into());
+        }
+        let part = &rest[4..4 + n];
+        rest = &rest[4 + n..];
+        Ok(part)
+    };
+    let parts = (vout, take()?, take()?, take()?, take()?);
+    if !rest.is_empty() || parts.4.len() > MAX_SPV_TX_BYTES {
+        return Err("NSP1 bundle has trailing bytes or an oversized transaction".into());
+    }
+    Ok(parts)
 }
 
 /// SHA-256 of any regular file (the verifier key is far larger than a binary).
@@ -509,7 +688,7 @@ pub async fn bind_active_chain(
             let block = core
                 .call("getblockheader", json!([r.block_hash, true]))
                 .await?;
-            let unspent = unspent_at_lookup(core, r).await?;
+            let unspent = unspent_at_lookup(core, &receipt.proven_output().unwrap()).await?;
             Ok(json!({
                 "statement_kind":"sp1_btc_payment_v1",
                 "proof_verified":true,
@@ -522,13 +701,54 @@ pub async fn bind_active_chain(
                                "program keys are audited (they are pinned candidates)"]
             }))
         }
+        StatementReceipt::NovaSpvPayment(r) => {
+            if expected_txid.is_some_and(|t| t != r.txid)
+                || expected_vout.is_some_and(|v| v != r.vout)
+            {
+                return Err(RpcError::new(
+                    -32052,
+                    "proven output is not the expected one",
+                ));
+            }
+            let first = &r.chain_to_block;
+            check_point(
+                core,
+                first.checkpoint.height,
+                &first.checkpoint.tip_hash,
+                &first.checkpoint.chainwork,
+            )
+            .await?;
+            let block = check_point(
+                core,
+                first.end.height,
+                &first.end.tip_hash,
+                &first.end.chainwork,
+            )
+            .await?;
+            if r.chain_to_tip.is_some() {
+                check_point(core, r.tip_height, &r.tip_hash, &r.tip_chainwork).await?;
+            }
+            let unspent = unspent_at_lookup(core, &receipt.proven_output().unwrap()).await?;
+            Ok(json!({
+                "statement_kind":"nova_spv_payment_v1",
+                "proof_verified":true,
+                "active_chain_at_lookup":true,
+                "core_confirmations":block["confirmations"],
+                "unspent_at_lookup":unspent,
+                "unspent_source":"bitcoin_core_gettxout_including_mempool",
+                "verified_statement":r,
+                "not_claimed":["unspentness is proven (it is Bitcoin Core's view at lookup)",
+                               "checkpoint authenticity beyond the operator pin",
+                               "the verifier key is audited (it is a pinned candidate)"]
+            }))
+        }
     }
 }
 
 /// Bitcoin Core's view of the proven output. A spend in the mempool counts as
 /// spent. When the output is unspent, its value and script must equal the
 /// proven ones, or Core and the proof disagree.
-async fn unspent_at_lookup(core: &CoreRpc, r: &PaymentReceipt) -> Result<bool, RpcError> {
+async fn unspent_at_lookup(core: &CoreRpc, r: &ProvenOutput) -> Result<bool, RpcError> {
     let out = core.call("gettxout", json!([r.txid, r.vout, true])).await?;
     if out.is_null() {
         return Ok(false);
@@ -552,7 +772,7 @@ async fn unspent_at_lookup(core: &CoreRpc, r: &PaymentReceipt) -> Result<bool, R
 /// Sum several verified payment receipts to one script: everything proven
 /// received, and the part Core reports unspent now. This is a lower bound on
 /// the script's balance; no proof shows that other outputs do not exist.
-pub fn proven_balance(entries: &[(PaymentReceipt, bool)]) -> Result<Value, String> {
+pub fn proven_balance(entries: &[(ProvenOutput, bool)]) -> Result<Value, String> {
     let first = entries.first().ok_or("no payment proofs")?;
     let script = &first.0.script_sha256;
     let mut seen = std::collections::BTreeSet::new();
@@ -629,27 +849,47 @@ mod tests {
     fn real_nova_receipt_binds_bundle_key_and_checkpoint() {
         let receipt: NovaHeaderReceipt = serde_json::from_str(NOVA_RECEIPT).unwrap();
         let policy = nova_policy();
-        receipt.validate(&policy, NOVA_BUNDLE).unwrap();
+        receipt
+            .validate(&policy.vk_sha256, &policy.checkpoints, NOVA_BUNDLE)
+            .unwrap();
 
         let mut other = NOVA_BUNDLE.to_vec();
         let n = other.len();
         other[n - 1] ^= 1;
-        assert!(receipt.validate(&policy, &other).is_err(), "proof bytes");
+        assert!(
+            receipt
+                .validate(&policy.vk_sha256, &policy.checkpoints, &other)
+                .is_err(),
+            "proof bytes"
+        );
         let mut unpinned = policy.clone();
         unpinned.checkpoints = vec!["ab".repeat(32)];
         assert!(
-            receipt.validate(&unpinned, NOVA_BUNDLE).is_err(),
+            receipt
+                .validate(&unpinned.vk_sha256, &unpinned.checkpoints, NOVA_BUNDLE)
+                .is_err(),
             "checkpoint pin"
         );
         let mut wrong_key = policy.clone();
         wrong_key.vk_sha256 = "cd".repeat(32);
-        assert!(receipt.validate(&wrong_key, NOVA_BUNDLE).is_err(), "vk pin");
+        assert!(
+            receipt
+                .validate(&wrong_key.vk_sha256, &wrong_key.checkpoints, NOVA_BUNDLE)
+                .is_err(),
+            "vk pin"
+        );
         let mut lie = receipt.clone();
         lie.headers = 99;
-        assert!(lie.validate(&policy, NOVA_BUNDLE).is_err(), "header count");
+        assert!(
+            lie.validate(&policy.vk_sha256, &policy.checkpoints, NOVA_BUNDLE)
+                .is_err(),
+            "header count"
+        );
         let mut rejected = receipt;
         rejected.verified = false;
-        assert!(rejected.validate(&policy, NOVA_BUNDLE).is_err());
+        assert!(rejected
+            .validate(&policy.vk_sha256, &policy.checkpoints, NOVA_BUNDLE)
+            .is_err());
     }
 
     #[test]
@@ -678,8 +918,41 @@ mod tests {
     }
 
     #[test]
+    fn nsp1_framing_is_strict() {
+        let part = |b: &[u8]| [&(b.len() as u32).to_le_bytes()[..], b].concat();
+        let good = [
+            b"NSP1".as_slice(),
+            &7u32.to_le_bytes(),
+            &part(b"aa"),
+            &part(b""),
+            &part(b"mb"),
+            &part(b"tx"),
+        ]
+        .concat();
+        let (vout, a, b, m, t) = split_nsp1(&good).unwrap();
+        assert_eq!(
+            (vout, a, b, m, t),
+            (7, &b"aa"[..], &b""[..], &b"mb"[..], &b"tx"[..])
+        );
+        assert!(split_nsp1(&good[..good.len() - 1]).is_err(), "truncated");
+        assert!(
+            split_nsp1(&[good.as_slice(), b"x"].concat()).is_err(),
+            "trailing"
+        );
+        let mut magic = good.clone();
+        magic[0] = b'X';
+        assert!(split_nsp1(&magic).is_err());
+        let mut huge = good.clone();
+        huge[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(split_nsp1(&huge).is_err(), "length overflow");
+    }
+
+    #[test]
     fn balance_is_a_lower_bound_over_one_script() {
-        let r: PaymentReceipt = serde_json::from_str(PAYMENT_RECEIPT).unwrap();
+        let receipt: PaymentReceipt = serde_json::from_str(PAYMENT_RECEIPT).unwrap();
+        let r = StatementReceipt::Sp1Payment(receipt)
+            .proven_output()
+            .unwrap();
         let mut second = r.clone();
         second.vout = 1;
         second.value_sats = 5;

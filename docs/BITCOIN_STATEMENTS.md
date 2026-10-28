@@ -7,6 +7,27 @@ happens elsewhere (see "Producing proofs"); the gateway only verifies.
 | --- | --- | --- | --- | --- |
 | `nova_header_chain_v1` | headers from a pinned checkpoint to an end tip, with height, hash and chainwork | NHC1, about 13.5 KB for 100 headers | `btc-header-fold verify-bundle` (`integrations/nova-header-chain`) | 2–5 s plus loading the 257 MB verifier key (a few seconds on Linux, about 40 s on Windows) |
 | `sp1_btc_payment_v1` | output `txid:vout` with value and script hash, included in block B, under a proven header chain to tip T | BPG1, 709 bytes | `btc-pay-verify` (`integrations/sp1-btc-payment`) | 0.28 s; the binary is 441 KB |
+| `nova_spv_payment_v1` | the same payment statement, from chained Nova proofs plus a plain SPV Merkle branch | NSP1, about 28 KB | the Nova verifier twice, plus the gateway's own Merkle and tx checks | about twice a Nova check |
+
+## Two ways to prove a payment
+
+| | `sp1_btc_payment_v1` | `nova_spv_payment_v1` |
+| --- | --- | --- |
+| Header chain | SP1 segments → aggregate → node: 18–22 GB per stage, about 4 minutes each | Nova folding: 1.4 GB, 0.076–0.146 s per header (laptop or VPS) |
+| Transaction inclusion | inside SP1 (payment program), then a Groth16 wrap: about 15 minutes, needs Docker | plain SPV Merkle branch checked by the gateway; no proving |
+| Bundle | 709 bytes | about 28 KB (two 13 KB proofs, a MerkleBlock and the tx) |
+| On-chain (BitVM) use | yes: a Groth16 proof over BN254 | no |
+| Measured end to end | about 45 minutes on the 31 GiB VPS | 990 + 10 headers in about 3 minutes on a laptop, including setup |
+
+**Chaining NSP1 proofs.** The first Nova proof runs from a pinned checkpoint
+to block B. The second runs from B to the tip, and its
+`checkpoint_state_sha256` must equal the first proof's `end_state_sha256`
+(the 17 folded state values). The second proof may be omitted, in which case
+the tip is B.
+
+**Inclusion check.** The MerkleBlock header must hash to the proven B, and
+its branch must bind exactly the transaction's TXID. A 64-byte transaction is
+refused, because it is ambiguous with an inner Merkle node.
 
 ## Request
 
@@ -86,6 +107,20 @@ Error codes:
 
 ## Operator configuration
 
+**Isolation status.** The statement verifiers run as child processes of the
+gateway: same identity, sandbox and `MemoryMax=2G` cgroup.
+
+- A Nova check with a cached key stays under about 1.3 GB (measured with key
+  rebuild).
+- This is weaker than the Raito path, whose verifier runs under a separate
+  UID behind `supernode-raito-verifier`. A parser bug in a verifier would
+  run as the gateway identity.
+- **Follow-up:** move these verifiers behind the same verifier broker, so a
+  separate UID holds no Core credentials. Until then, enable them only where
+  that risk is acceptable.
+- In the sample unit, `SUPERNODE_STATEMENT_DIR` is
+  `/var/lib/supernode-gateway/statements`.
+
 ```
 SUPERNODE_STATEMENT_DIR=/var/lib/supernode/statements   # absolute; needs SUPERNODE_CONTROL_TOKEN
 
@@ -131,7 +166,18 @@ btc-header-fold pack OUT bundle.nhc1
   128-byte SP1 chain start state) and `--headers-txt FILE` (lines of
   `height hex`).
 
-**Payment.** Use the SP1 host bins on Raito-Scrypt `research/bitcoin-bitvm`:
+**Nova SPV payment.** Fold the checkpoint to block B and save it (`--save
+A`), then fold B to the tip (`--start B`, `--save Btip`). Pack each with
+`pack`, then:
+
+```
+btc-header-fold pack-spv OUT.nsp1 VOUT A.nhc1 Btip.nhc1 MERKLEBLOCK_HEX TX_HEX
+```
+
+The MerkleBlock is Core's `gettxoutproof`, or Esplora's
+`/tx/:txid/merkleblock-proof`. It is verified, so its source does not matter.
+
+**Payment (SP1).** Use the SP1 host bins on Raito-Scrypt `research/bitcoin-bitvm`:
 
 1. `chain-segment`, then `chain-prove` per 252-header segment;
 2. `chain-agg-prove`;
@@ -163,6 +209,16 @@ Then run `btc-pay-verify pack groth16.proof.hex public_values.hex bundle.bpg1`.
   natively by 8 headers.
 - Its end tip hash and chainwork equal the payment proof's tip. The gateway
   test `modern_header_chain_proof_ends_at_the_payment_proof_tip` checks this.
+
+**`integrations/nova-header-chain/fixtures/payment959984.nsp1`**
+
+- The same payment as `payment.bpg1`, proved without SP1.
+- `to959984.nhc1`: 990 headers from 958,994, 78 s to fold on a laptop.
+- `959984to959994.nhc1`: 10 headers, chained by its end state.
+- Esplora's MerkleBlock and raw tx for `fd2fdd44`.
+- Gateway test: `nova_spv_payment_is_verified_chained_and_bound_to_core`.
+  It checks acceptance, the expected output, and the refusal of a tampered
+  tx, header or second proof, a non-continuing second proof, and a reorg.
 
 **`integrations/sp1-btc-payment/fixtures/payment.bpg1`**
 
@@ -196,7 +252,8 @@ recent pinned checkpoint:
 against Core separately. A test shows that they agree on the tip (958,994 →
 959,994), but the gateway does not require it.
 
-- Next, accept a payment only under a pinned or just-verified Nova end state.
+- NSP1 already proves payments without SP1. The remaining reason for SP1 is
+  the Groth16 output for BitVM.
 - Or make the payment program accept a Nova chain proof instead of the SP1
   node proof. That would replace 18–22 GB stages with 1.4 GB folding for the
   chain part.
