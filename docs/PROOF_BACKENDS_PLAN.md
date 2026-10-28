@@ -1,5 +1,17 @@
 # Plan: cheap Bitcoin proof backends for the adapter (2026-10-28)
 
+> **Status (2026-10-28 night):** steps 1–4 are done and step 5 is open.
+> Proving stays off the gateway: clients submit small bundles to
+> `zk.statement.verify` (`docs/BITCOIN_STATEMENTS.md`) instead of the job
+> queue.
+>
+> The payment verifier checks the Groth16 wrap (709-byte bundle, 0.28 s), not
+> the 1.27 MB compressed proof, because the gateway's RPC body limit is
+> 64 KiB.
+>
+> Both verifiers live in `integrations/`, with real mainnet fixtures, and run
+> end to end in CI (`.github/workflows/bitcoin-statements.yml`).
+
 Goal: header-chain and payment proofs that run on commodity hardware, plugged
 into the existing dispatcher. Each backend follows the dispatcher's pattern:
 

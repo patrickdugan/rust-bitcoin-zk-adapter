@@ -1,0 +1,27 @@
+[package]
+name = "nova-header-chain"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Bitcoin header-chain proofs by Nova folding: prover, NHC1 bundles and the btc_header_chain_v1 verifier"
+
+[dependencies]
+nova-snark = "=0.76.0"
+ff = "0.13"
+num-bigint = "0.4"
+num-traits = "0.2"
+sha2 = "0.10"
+hex = "0.4"
+bincode = "1.3"
+
+[profile.release]
+debug = false
+
+
+[[bin]]
+name = "btc-header-fold"
+path = "src/main.rs"
+
+# A separately compiled verifier/prover; on CPUs without ADX run
+# scripts/vendor-nova-noasm.sh first (it appends a [patch.crates-io]).
+[workspace]

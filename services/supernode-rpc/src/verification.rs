@@ -29,7 +29,7 @@ fn valid_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn file_digest(path: &Path) -> Result<String, String> {
+pub(crate) fn file_digest(path: &Path) -> Result<String, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !meta.file_type().is_file() || meta.len() > MAX_VERIFIER_BINARY_BYTES {
         return Err("Raito verifier binary is absent, unsafe or oversized".into());

@@ -6,6 +6,9 @@ use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
 };
 use rust_bitcoin_supernode_rpc::jobs::{JobLimits, JobManager, WorkerPrograms};
+use rust_bitcoin_supernode_rpc::statements::{
+    NovaPolicy, PaymentPolicy, PinnedProgram, StatementVerifiers,
+};
 use rust_bitcoin_supernode_rpc::verification::RaitoVerifier;
 #[cfg(unix)]
 use rust_bitcoin_supernode_rpc::verification_broker::IsolatedRaitoVerifier;
@@ -26,6 +29,50 @@ fn credential_pair() -> Result<(String, String), Box<dyn Error>> {
         env::var("BITCOIN_RPC_USER")?,
         env::var("BITCOIN_RPC_PASSWORD")?,
     ))
+}
+
+/// Operator pins for client-submitted statement proofs. Each verifier is
+/// enabled only when its executable variable is set.
+fn statement_verifiers(dir: std::path::PathBuf) -> Result<StatementVerifiers, Box<dyn Error>> {
+    let program = |prefix: &str| -> Result<Option<PinnedProgram>, Box<dyn Error>> {
+        Ok(match env::var(format!("{prefix}_VERIFIER")) {
+            Ok(path) => Some(PinnedProgram {
+                executable: path.into(),
+                binary_sha256: env::var(format!("{prefix}_VERIFIER_SHA256"))?,
+            }),
+            Err(_) => None,
+        })
+    };
+    let nova = match program("SUPERNODE_NOVA")? {
+        Some(program) => Some(NovaPolicy {
+            program,
+            vk_path: env::var("SUPERNODE_NOVA_VK")?.into(),
+            vk_sha256: env::var("SUPERNODE_NOVA_VK_SHA256")?,
+            checkpoints: env::var("SUPERNODE_NOVA_CHECKPOINTS")?
+                .split(',')
+                .map(|c| c.trim().to_owned())
+                .collect(),
+        }),
+        None => None,
+    };
+    let payment = match program("SUPERNODE_PAYMENT")? {
+        Some(program) => {
+            let words = env::var("SUPERNODE_PAYMENT_PROGRAM_WORDS")?;
+            let words: Vec<&str> = words.split(',').map(str::trim).collect();
+            let [node, leaf, segment] = words[..] else {
+                return Err("SUPERNODE_PAYMENT_PROGRAM_WORDS needs node,leaf,segment".into());
+            };
+            Some(PaymentPolicy {
+                program,
+                pay_vkey: env::var("SUPERNODE_PAYMENT_PAY_VKEY")?,
+                node_program_words: node.into(),
+                leaf_program_words: leaf.into(),
+                segment_program_words: segment.into(),
+            })
+        }
+        None => None,
+    };
+    Ok(StatementVerifiers::new(dir, nova, payment)?)
 }
 
 #[tokio::main]
@@ -63,8 +110,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if env::var("SUPERNODE_ARTIFACT_DIR").is_ok() && control.is_none() {
         return Err("SUPERNODE_CONTROL_TOKEN is required when artifact storage is enabled".into());
     }
+    if env::var("SUPERNODE_STATEMENT_DIR").is_ok() && control.is_none() {
+        return Err(
+            "SUPERNODE_CONTROL_TOKEN is required when statement verifiers are enabled".into(),
+        );
+    }
     if let Some(control) = control {
         gateway = gateway.with_control_token(control)?;
+    }
+    if let Ok(dir) = env::var("SUPERNODE_STATEMENT_DIR") {
+        gateway = gateway.with_statement_verifiers(Arc::new(statement_verifiers(dir.into())?));
     }
     let mut artifacts = None;
     if let Ok(root) = env::var("SUPERNODE_ARTIFACT_DIR") {

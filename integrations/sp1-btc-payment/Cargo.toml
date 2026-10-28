@@ -1,0 +1,19 @@
+[package]
+name = "sp1-btc-payment"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Verifier for SP1 Groth16 Bitcoin payment-inclusion proofs (LIGHTO-BTC-PAYMENT-v1) emitting btc_payment_v1 receipts"
+
+[dependencies]
+sp1-verifier = "=6.9.0"
+sha2 = "0.10"
+hex = "0.4"
+
+[[bin]]
+name = "btc-pay-verify"
+path = "src/main.rs"
+
+# A separately compiled verifier; the gateway pins its binary SHA-256.
+[workspace]

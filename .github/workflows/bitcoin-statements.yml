@@ -1,0 +1,51 @@
+name: Bitcoin statement proofs (real proofs)
+# Builds both statement verifiers from integrations/, checks the real mainnet
+# fixtures with each, then drives zk.statement.verify end to end through the
+# gateway against a mock Core serving the proven chain points.
+on:
+  push:
+    paths:
+      - 'integrations/nova-header-chain/**'
+      - 'integrations/sp1-btc-payment/**'
+      - 'services/supernode-rpc/**'
+      - '.github/workflows/bitcoin-statements.yml'
+  pull_request:
+    paths:
+      - 'integrations/nova-header-chain/**'
+      - 'integrations/sp1-btc-payment/**'
+      - 'services/supernode-rpc/**'
+      - '.github/workflows/bitcoin-statements.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  statements:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Payment verifier (SP1 Groth16)
+        working-directory: integrations/sp1-btc-payment
+        run: |
+          cargo fmt -- --check
+          cargo clippy --release --all-targets -- -D warnings
+          cargo test --release
+      - name: Header-chain verifier (Nova), circuit and real-proof tests
+        working-directory: integrations/nova-header-chain
+        run: cargo test --release
+      - name: Verifier key pin
+        working-directory: integrations/nova-header-chain
+        run: |
+          out=$(target/release/btc-header-fold vk-export 10 "$RUNNER_TEMP/nova_vk.bin")
+          echo "$out"
+          test "$out" = "vk_sha256=e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698"
+      - name: Gateway end to end with the real verifiers
+        working-directory: services/supernode-rpc
+        env:
+          SUPERNODE_TEST_PAYMENT_VERIFIER: ${{ github.workspace }}/integrations/sp1-btc-payment/target/release/btc-pay-verify
+          SUPERNODE_TEST_NOVA_VERIFIER: ${{ github.workspace }}/integrations/nova-header-chain/target/release/btc-header-fold
+          SUPERNODE_TEST_NOVA_VK: ${{ runner.temp }}/nova_vk.bin
+        run: cargo test --test statements_gateway -- --nocapture

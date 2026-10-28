@@ -23,6 +23,7 @@ pub mod cache;
 pub mod chain;
 pub mod jobs;
 pub mod process;
+pub mod statements;
 pub mod verification;
 #[cfg(unix)]
 pub mod verification_broker;
@@ -150,6 +151,7 @@ pub struct Gateway {
     chain: Arc<chain::ChainTracker>,
     artifacts: Option<Arc<cache::ArtifactStore>>,
     jobs: Option<Arc<jobs::JobManager>>,
+    statements: Option<Arc<statements::StatementVerifiers>>,
 }
 
 impl Gateway {
@@ -168,6 +170,7 @@ impl Gateway {
             chain: Arc::new(chain::ChainTracker::new(false)),
             artifacts: None,
             jobs: None,
+            statements: None,
         })
     }
 
@@ -187,6 +190,14 @@ impl Gateway {
 
     pub fn with_job_manager(mut self, manager: Arc<jobs::JobManager>) -> Self {
         self.jobs = Some(manager);
+        self
+    }
+
+    pub fn with_statement_verifiers(
+        mut self,
+        verifiers: Arc<statements::StatementVerifiers>,
+    ) -> Self {
+        self.statements = Some(verifiers);
         self
     }
 
@@ -249,7 +260,7 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
 pub fn requires_control_token(method: &str) -> bool {
     matches!(
         method,
-        "zk.artifact.put" | "zk.proof.submit" | "zk.proof.verify"
+        "zk.artifact.put" | "zk.proof.submit" | "zk.proof.verify" | "zk.statement.verify"
     )
 }
 
@@ -369,6 +380,10 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
                 "job_queue_connected":gateway.jobs.as_ref().is_some_and(|m| m.raito_worker_configured())
             },
             "shinigami": {"script_prover_connected":false},
+            "bitcoin_statements": match &gateway.statements {
+                Some(verifiers) => verifiers.capabilities(),
+                None => json!({"enabled":false}),
+            },
             "ark": {"vtxo_index_connected":false},
             "limits": {"inflight_requests":MAX_INFLIGHT_REQUESTS,
                        "rpc_response_bytes":MAX_RPC_RESPONSE_BYTES}
@@ -385,6 +400,7 @@ async fn execute(gateway: &Gateway, method: &str, params: Value) -> Result<Value
         "zk.proof.verify" => proof_job_verify(gateway, &params).await,
         "zk.proof.receipt" => proof_job_receipt(gateway, &params).await,
         "zk.proof.get" => proof_job_get(gateway, &params).await,
+        "zk.statement.verify" => verify_statement(gateway, &params).await,
         "zk.chain.refresh" => gateway
             .chain
             .reconcile(core)
@@ -881,6 +897,57 @@ async fn proof_job_receipt(gateway: &Gateway, params: &Value) -> Result<Value, R
         .verified_receipt(id)
         .await
         .map_err(|error| RpcError::new(-32043, error))
+}
+
+/// `[kind, bundle_hex, expected_txid?, expected_vout?]`: verify a client
+/// proof with the operator-pinned verifier for `kind`, then bind every chain
+/// claim to Bitcoin Core's active chain at lookup.
+async fn verify_statement(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
+    const USAGE: &str = "expected [kind, bundle_hex, expected_txid?, expected_vout?]";
+    let verifiers = gateway
+        .statements
+        .as_ref()
+        .ok_or_else(|| RpcError::new(-32601, "statement verifiers not configured"))?;
+    let args = params
+        .as_array()
+        .filter(|a| (2..=4).contains(&a.len()))
+        .ok_or_else(|| RpcError::new(-32602, USAGE))?;
+    let kind = statements::StatementKind::from_name(args[0].as_str().unwrap_or(""))
+        .map_err(|e| RpcError::new(-32602, e))?;
+    let bundle = hex::decode(args[1].as_str().unwrap_or(""))
+        .map_err(|_| RpcError::new(-32602, "invalid bundle hexadecimal"))?;
+    let expected_txid = match args.get(2) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            Txid::from_str(v.as_str().unwrap_or(""))
+                .map_err(|_| RpcError::new(-32602, "invalid expected TXID"))?
+                .to_string(),
+        ),
+    };
+    let expected_vout = match args.get(3) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| RpcError::new(-32602, "invalid expected output index"))?,
+        ),
+    };
+    if kind == statements::StatementKind::NovaHeaders
+        && (expected_txid.is_some() || expected_vout.is_some())
+    {
+        return Err(RpcError::new(-32602, "header-chain proofs take no output"));
+    }
+    let receipt = verifiers
+        .verify(kind, &bundle)
+        .await
+        .map_err(|e| RpcError::new(-32053, e))?;
+    statements::bind_active_chain(
+        &gateway.core,
+        &receipt,
+        expected_txid.as_deref(),
+        expected_vout,
+    )
+    .await
 }
 
 async fn proof_job_status(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
