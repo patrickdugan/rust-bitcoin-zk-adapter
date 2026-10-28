@@ -280,3 +280,121 @@ mod verifier_tests {
         assert!(serde_json::from_value::<VerifyReply>(json).is_err());
     }
 }
+
+/// Kinds the separate-UID statement verifier broker can run. Each names one
+/// operator-pinned executable; the NSP1 payment kind reaches the broker as
+/// its two `nova_header_chain_v1` parts.
+pub const STATEMENT_RUN_KINDS: [&str; 2] = ["nova_header_chain_v1", "sp1_btc_payment_v1"];
+pub const MAX_STATEMENT_BUNDLE_BYTES: u64 = 32 * 1024;
+pub const MAX_STATEMENT_STDOUT_BYTES: u64 = 8192;
+
+/// Request to the statement verifier broker: `bundle_bytes` raw bundle bytes
+/// follow this header. The broker runs the pinned executable for `kind` and
+/// returns its stdout; it does not interpret the receipt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatementRunRequest {
+    pub version: u8,
+    pub kind: String,
+    pub bundle_sha256: String,
+    pub bundle_bytes: u64,
+}
+
+impl StatementRunRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != VERSION
+            || !STATEMENT_RUN_KINDS.contains(&self.kind.as_str())
+            || !hex_hash(&self.bundle_sha256)
+            || !(1..=MAX_STATEMENT_BUNDLE_BYTES).contains(&self.bundle_bytes)
+        {
+            return Err("invalid or unsupported statement verifier request".into());
+        }
+        Ok(())
+    }
+}
+
+/// Reply from the statement verifier broker: `stdout_bytes` raw bytes of the
+/// verifier's stdout follow this header. `error` reports a broker failure
+/// (pin mismatch, timeout); a verifier that ran and rejected the bundle has
+/// `exit_success: false` and its stdout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatementRunReply {
+    pub version: u8,
+    pub exit_success: bool,
+    pub exit_status: String,
+    pub stdout_bytes: u64,
+    pub error: Option<String>,
+}
+
+impl StatementRunReply {
+    /// The stdout length to read next, if the broker ran the verifier.
+    pub fn completed(&self) -> Result<u64, String> {
+        if self.version != VERSION {
+            return Err("statement verifier broker version mismatch".into());
+        }
+        if let Some(error) = &self.error {
+            return Err(format!("statement verifier broker: {error}"));
+        }
+        if self.stdout_bytes > MAX_STATEMENT_STDOUT_BYTES {
+            return Err("statement verifier stdout exceeds size limit".into());
+        }
+        Ok(self.stdout_bytes)
+    }
+
+    pub fn rejected(message: &str) -> Self {
+        Self {
+            version: VERSION,
+            exit_success: false,
+            exit_status: String::new(),
+            stdout_bytes: 0,
+            error: Some(message.chars().take(200).collect()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod statement_tests {
+    use super::*;
+    #[test]
+    fn statement_request_names_a_pinned_kind_and_bounded_bundle() {
+        let mut request = StatementRunRequest {
+            version: VERSION,
+            kind: "sp1_btc_payment_v1".into(),
+            bundle_sha256: "ab".repeat(32),
+            bundle_bytes: 709,
+        };
+        request.validate().unwrap();
+        request.kind = "/usr/bin/sh".into();
+        assert!(request.validate().is_err());
+        request.kind = "nova_spv_payment_v1".into();
+        assert!(request.validate().is_err(), "split by the gateway");
+        request.kind = "nova_header_chain_v1".into();
+        request.bundle_bytes = MAX_STATEMENT_BUNDLE_BYTES + 1;
+        assert!(request.validate().is_err());
+        request.bundle_bytes = 0;
+        assert!(request.validate().is_err());
+        let mut json = serde_json::to_value(&request).unwrap();
+        json["args"] = serde_json::json!(["--vk", "/tmp/forged"]);
+        assert!(serde_json::from_value::<StatementRunRequest>(json).is_err());
+    }
+    #[test]
+    fn statement_reply_bounds_stdout_and_surfaces_broker_errors() {
+        assert!(StatementRunReply::rejected("timed out")
+            .completed()
+            .is_err());
+        let mut reply = StatementRunReply {
+            version: VERSION,
+            exit_success: false,
+            exit_status: "exit status: 1".into(),
+            stdout_bytes: 40,
+            error: None,
+        };
+        assert_eq!(reply.completed(), Ok(40));
+        reply.stdout_bytes = MAX_STATEMENT_STDOUT_BYTES + 1;
+        assert!(reply.completed().is_err());
+        let mut json = serde_json::to_value(&reply).unwrap();
+        json["proof_verified"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<StatementRunReply>(json).is_err());
+    }
+}

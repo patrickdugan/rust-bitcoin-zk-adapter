@@ -8,10 +8,15 @@
 //! - `SUPERNODE_TEST_NOVA_VK`: the output of `btc-header-fold vk-export 10`.
 //!
 //! A test whose variables are unset is skipped (it reports so on stderr).
+//!
+//! On Unix, `SUPERNODE_TEST_STATEMENT_SOCKET` and
+//! `SUPERNODE_TEST_STATEMENT_UID` instead name a running separate-UID
+//! `supernode-statement-verifier-broker` that holds both real verifiers; every
+//! test then verifies through it (see `test-separated-uids.sh` there).
 use axum::{routing::post, Json, Router};
 use bitcoin::hashes::{sha256, Hash};
 use rust_bitcoin_supernode_rpc::statements::{
-    NovaPolicy, PaymentPolicy, PinnedProgram, StatementVerifiers,
+    NovaPolicy, NovaProgram, PaymentPolicy, PinnedProgram, StatementRunner, StatementVerifiers,
 };
 use rust_bitcoin_supernode_rpc::{router, CoreRpc, Gateway};
 use serde_json::{json, Value};
@@ -121,17 +126,78 @@ fn pinned(var: &str) -> Option<PinnedProgram> {
     })
 }
 
+/// The broker named by the environment, or direct verifiers for the policies
+/// given; `None` when the needed variables are unset.
+fn runner(nova: bool, payment: bool) -> Option<StatementRunner> {
+    #[cfg(unix)]
+    if let Ok(socket) = std::env::var("SUPERNODE_TEST_STATEMENT_SOCKET") {
+        let uid = std::env::var("SUPERNODE_TEST_STATEMENT_UID")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let broker = rust_bitcoin_supernode_rpc::statement_broker::IsolatedStatementRunner::new(
+            socket.into(),
+            uid,
+        )
+        .unwrap();
+        return Some(StatementRunner::Isolated(broker));
+    }
+    let nova = match nova {
+        true => Some(NovaProgram {
+            program: pinned("SUPERNODE_TEST_NOVA_VERIFIER")?,
+            vk_path: std::fs::canonicalize(std::env::var("SUPERNODE_TEST_NOVA_VK").ok()?).unwrap(),
+        }),
+        false => None,
+    };
+    let payment = match payment {
+        true => Some(pinned("SUPERNODE_TEST_PAYMENT_VERIFIER")?),
+        false => None,
+    };
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work_dir = std::env::temp_dir().join(format!("statements-{}-{n}", std::process::id()));
+    Some(StatementRunner::Direct {
+        work_dir,
+        nova,
+        payment,
+    })
+}
+
+const NOVA_VK_SHA256: &str = "e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698";
+
+fn nova_policy(checkpoint: &str) -> NovaPolicy {
+    NovaPolicy {
+        vk_sha256: NOVA_VK_SHA256.into(),
+        checkpoints: vec![checkpoint.into()],
+    }
+}
+
+fn payment_policy() -> PaymentPolicy {
+    PaymentPolicy {
+        pay_vkey: PAY_VKEY.into(),
+        node_program_words: "a95b1a6090a64052fb6c2c12a0c5c861843a8b04b68e2218f77c9c4693510d76"
+            .into(),
+        leaf_program_words: "12c6f307aff4045af93b5a1d0221eb303955312728625960efa42d592e843701"
+            .into(),
+        segment_program_words: "99dedc0b1be5794d932fb94e6d90030e663383572f25bb5161e7347ab0fc4550"
+            .into(),
+    }
+}
+
+/// A gateway over a mock Core, or `None` (the test is skipped) when the
+/// verifier variables are unset.
 async fn start(
     chain: Chain,
     txout: TxOut,
     nova: Option<NovaPolicy>,
     payment: Option<PaymentPolicy>,
-) -> String {
+) -> Option<String> {
+    let Some(runner) = runner(nova.is_some(), payment.is_some()) else {
+        eprintln!("skipped: verifier variables unset");
+        return None;
+    };
     let core = CoreRpc::new(&mock_core(chain, txout).await, "u".into(), "p".into()).unwrap();
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("statements-{}-{n}", std::process::id()));
-    let verifiers = StatementVerifiers::new(dir, nova, payment).unwrap();
+    let verifiers = StatementVerifiers::new(runner, nova, payment).unwrap();
     let gateway = Gateway::new(core, READ.into(), 4)
         .unwrap()
         .with_control_token(CONTROL.into())
@@ -140,7 +206,7 @@ async fn start(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router(gateway)).await.unwrap() });
-    format!("http://{address}")
+    Some(format!("http://{address}"))
 }
 
 async fn call(url: &str, token: &str, params: Value) -> Value {
@@ -171,23 +237,11 @@ fn fixture(path: &str) -> String {
 
 #[tokio::test]
 async fn real_payment_proof_is_verified_and_bound_to_core() {
-    let Some(program) = pinned("SUPERNODE_TEST_PAYMENT_VERIFIER") else {
-        eprintln!("skipped: SUPERNODE_TEST_PAYMENT_VERIFIER unset");
-        return;
-    };
-    let policy = PaymentPolicy {
-        program,
-        pay_vkey: PAY_VKEY.into(),
-        node_program_words: "a95b1a6090a64052fb6c2c12a0c5c861843a8b04b68e2218f77c9c4693510d76"
-            .into(),
-        leaf_program_words: "12c6f307aff4045af93b5a1d0221eb303955312728625960efa42d592e843701"
-            .into(),
-        segment_program_words: "99dedc0b1be5794d932fb94e6d90030e663383572f25bb5161e7347ab0fc4550"
-            .into(),
-    };
     let chain = payment_chain();
     let txout = unspent_txout();
-    let url = start(chain.clone(), txout.clone(), None, Some(policy)).await;
+    let Some(url) = start(chain.clone(), txout.clone(), None, Some(payment_policy())).await else {
+        return;
+    };
     let bundle = fixture("sp1-btc-payment/fixtures/payment.bpg1");
 
     let ok = call(
@@ -267,23 +321,11 @@ async fn real_payment_proof_is_verified_and_bound_to_core() {
 
 #[tokio::test]
 async fn real_header_chain_proof_is_verified_and_bound_to_core() {
-    let (Some(program), Ok(vk)) = (
-        pinned("SUPERNODE_TEST_NOVA_VERIFIER"),
-        std::env::var("SUPERNODE_TEST_NOVA_VK"),
-    ) else {
-        eprintln!("skipped: SUPERNODE_TEST_NOVA_VERIFIER / SUPERNODE_TEST_NOVA_VK unset");
+    let policy = nova_policy("3e53c33057b13ffecca476024bc78962b624814f41ac9d39e127e8f5a51a507e");
+    let chain = nova_chain();
+    let Some(url) = start(chain.clone(), unspent_txout(), Some(policy), None).await else {
         return;
     };
-    let policy = NovaPolicy {
-        program,
-        vk_path: std::fs::canonicalize(vk).unwrap(),
-        vk_sha256: "e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698".into(),
-        checkpoints: vec![
-            "3e53c33057b13ffecca476024bc78962b624814f41ac9d39e127e8f5a51a507e".into(),
-        ],
-    };
-    let chain = nova_chain();
-    let url = start(chain.clone(), unspent_txout(), Some(policy), None).await;
     let bundle = fixture("nova-header-chain/fixtures/nova100.nhc1");
 
     let ok = call(&url, CONTROL, json!(["nova_header_chain_v1", bundle])).await;
@@ -307,32 +349,8 @@ async fn real_header_chain_proof_is_verified_and_bound_to_core() {
 /// the same tip hash and chainwork.
 #[tokio::test]
 async fn modern_header_chain_proof_ends_at_the_payment_proof_tip() {
-    let (Some(nova_program), Ok(vk), Some(pay_program)) = (
-        pinned("SUPERNODE_TEST_NOVA_VERIFIER"),
-        std::env::var("SUPERNODE_TEST_NOVA_VK"),
-        pinned("SUPERNODE_TEST_PAYMENT_VERIFIER"),
-    ) else {
-        eprintln!("skipped: verifier variables unset");
-        return;
-    };
-    let nova = NovaPolicy {
-        program: nova_program,
-        vk_path: std::fs::canonicalize(vk).unwrap(),
-        vk_sha256: "e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698".into(),
-        checkpoints: vec![
-            "f6db0a7fc59782567f6e49842cb21d62d4d493a97a13d65ddfca0f0a8503efe2".into(),
-        ],
-    };
-    let payment = PaymentPolicy {
-        program: pay_program,
-        pay_vkey: PAY_VKEY.into(),
-        node_program_words: "a95b1a6090a64052fb6c2c12a0c5c861843a8b04b68e2218f77c9c4693510d76"
-            .into(),
-        leaf_program_words: "12c6f307aff4045af93b5a1d0221eb303955312728625960efa42d592e843701"
-            .into(),
-        segment_program_words: "99dedc0b1be5794d932fb94e6d90030e663383572f25bb5161e7347ab0fc4550"
-            .into(),
-    };
+    let nova = nova_policy("f6db0a7fc59782567f6e49842cb21d62d4d493a97a13d65ddfca0f0a8503efe2");
+    let payment = payment_policy();
     let chain = payment_chain();
     chain.lock().unwrap().insert(
         958_994,
@@ -341,7 +359,9 @@ async fn modern_header_chain_proof_ends_at_the_payment_proof_tip() {
             "0x1395bd71adc43a240a19aeb6e".into(),
         ),
     );
-    let url = start(chain, unspent_txout(), Some(nova), Some(payment)).await;
+    let Some(url) = start(chain, unspent_txout(), Some(nova), Some(payment)).await else {
+        return;
+    };
 
     let headers = call(
         &url,
@@ -381,21 +401,7 @@ async fn modern_header_chain_proof_ends_at_the_payment_proof_tip() {
 /// block 959,984. Everything here proves on a laptop in 1.4 GB.
 #[tokio::test]
 async fn nova_spv_payment_is_verified_chained_and_bound_to_core() {
-    let (Some(program), Ok(vk)) = (
-        pinned("SUPERNODE_TEST_NOVA_VERIFIER"),
-        std::env::var("SUPERNODE_TEST_NOVA_VK"),
-    ) else {
-        eprintln!("skipped: SUPERNODE_TEST_NOVA_VERIFIER / SUPERNODE_TEST_NOVA_VK unset");
-        return;
-    };
-    let policy = NovaPolicy {
-        program,
-        vk_path: std::fs::canonicalize(vk).unwrap(),
-        vk_sha256: "e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698".into(),
-        checkpoints: vec![
-            "f6db0a7fc59782567f6e49842cb21d62d4d493a97a13d65ddfca0f0a8503efe2".into(),
-        ],
-    };
+    let policy = nova_policy("f6db0a7fc59782567f6e49842cb21d62d4d493a97a13d65ddfca0f0a8503efe2");
     let chain = payment_chain();
     {
         let mut c = chain.lock().unwrap();
@@ -408,7 +414,9 @@ async fn nova_spv_payment_is_verified_chained_and_bound_to_core() {
         );
         c.get_mut(&959_984).unwrap().1 = "0x13b19e60158560924b29346e7".into();
     }
-    let url = start(chain.clone(), unspent_txout(), Some(policy), None).await;
+    let Some(url) = start(chain.clone(), unspent_txout(), Some(policy), None).await else {
+        return;
+    };
     let bundle = fixture("nova-header-chain/fixtures/payment959984.nsp1");
 
     let ok = call(

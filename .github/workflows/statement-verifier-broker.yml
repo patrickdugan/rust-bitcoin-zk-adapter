@@ -1,0 +1,29 @@
+name: Isolated statement verifier
+# Unit and IPC tests of the separate-UID statement verifier broker. The
+# real-proof separate-UID run is in bitcoin-statements.yml.
+on:
+  push:
+    paths:
+      - 'services/statement-verifier-broker/**'
+      - 'integrations/worker-broker-protocol/**'
+      - '.github/workflows/statement-verifier-broker.yml'
+  pull_request:
+    paths:
+      - 'services/statement-verifier-broker/**'
+      - 'integrations/worker-broker-protocol/**'
+      - '.github/workflows/statement-verifier-broker.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path services/statement-verifier-broker/Cargo.toml -- --check
+      - run: cargo test --manifest-path services/statement-verifier-broker/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path services/statement-verifier-broker/Cargo.toml --all-targets -- -D warnings

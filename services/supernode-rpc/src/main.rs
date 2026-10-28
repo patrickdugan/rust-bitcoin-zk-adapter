@@ -6,8 +6,10 @@ use rust_bitcoin_supernode_rpc::chain::{
     run_sequence_subscriber, validate_local_sequence_endpoint, ChainTracker,
 };
 use rust_bitcoin_supernode_rpc::jobs::{JobLimits, JobManager, WorkerPrograms};
+#[cfg(unix)]
+use rust_bitcoin_supernode_rpc::statement_broker::IsolatedStatementRunner;
 use rust_bitcoin_supernode_rpc::statements::{
-    NovaPolicy, PaymentPolicy, PinnedProgram, StatementVerifiers,
+    NovaPolicy, NovaProgram, PaymentPolicy, PinnedProgram, StatementRunner, StatementVerifiers,
 };
 use rust_bitcoin_supernode_rpc::verification::RaitoVerifier;
 #[cfg(unix)]
@@ -31,9 +33,12 @@ fn credential_pair() -> Result<(String, String), Box<dyn Error>> {
     ))
 }
 
-/// Operator pins for client-submitted statement proofs. Each verifier is
-/// enabled only when its executable variable is set.
-fn statement_verifiers(dir: std::path::PathBuf) -> Result<StatementVerifiers, Box<dyn Error>> {
+/// Operator pins for client-submitted statement proofs. A kind is enabled by
+/// its policy pin (`SUPERNODE_NOVA_VK_SHA256`, `SUPERNODE_PAYMENT_PAY_VKEY`).
+/// Its verifier runs behind the separate-UID broker at
+/// `SUPERNODE_STATEMENT_VERIFIER_SOCKET`, or, with an explicit development
+/// opt-in, as a gateway child from `SUPERNODE_{NOVA,PAYMENT}_VERIFIER`.
+fn statement_verifiers(dir: Option<String>) -> Result<StatementVerifiers, Box<dyn Error>> {
     let program = |prefix: &str| -> Result<Option<PinnedProgram>, Box<dyn Error>> {
         Ok(match env::var(format!("{prefix}_VERIFIER")) {
             Ok(path) => Some(PinnedProgram {
@@ -43,36 +48,68 @@ fn statement_verifiers(dir: std::path::PathBuf) -> Result<StatementVerifiers, Bo
             Err(_) => None,
         })
     };
-    let nova = match program("SUPERNODE_NOVA")? {
-        Some(program) => Some(NovaPolicy {
-            program,
-            vk_path: env::var("SUPERNODE_NOVA_VK")?.into(),
-            vk_sha256: env::var("SUPERNODE_NOVA_VK_SHA256")?,
+    let nova = match env::var("SUPERNODE_NOVA_VK_SHA256") {
+        Ok(vk_sha256) => Some(NovaPolicy {
+            vk_sha256,
             checkpoints: env::var("SUPERNODE_NOVA_CHECKPOINTS")?
                 .split(',')
                 .map(|c| c.trim().to_owned())
                 .collect(),
         }),
-        None => None,
+        Err(_) => None,
     };
-    let payment = match program("SUPERNODE_PAYMENT")? {
-        Some(program) => {
+    let payment = match env::var("SUPERNODE_PAYMENT_PAY_VKEY") {
+        Ok(pay_vkey) => {
             let words = env::var("SUPERNODE_PAYMENT_PROGRAM_WORDS")?;
             let words: Vec<&str> = words.split(',').map(str::trim).collect();
             let [node, leaf, segment] = words[..] else {
                 return Err("SUPERNODE_PAYMENT_PROGRAM_WORDS needs node,leaf,segment".into());
             };
             Some(PaymentPolicy {
-                program,
-                pay_vkey: env::var("SUPERNODE_PAYMENT_PAY_VKEY")?,
+                pay_vkey,
                 node_program_words: node.into(),
                 leaf_program_words: leaf.into(),
                 segment_program_words: segment.into(),
             })
         }
+        Err(_) => None,
+    };
+    #[cfg(unix)]
+    if let Ok(socket) = env::var("SUPERNODE_STATEMENT_VERIFIER_SOCKET") {
+        if env::var("SUPERNODE_NOVA_VERIFIER").is_ok()
+            || env::var("SUPERNODE_PAYMENT_VERIFIER").is_ok()
+        {
+            return Err(
+                "isolated statement verifier socket excludes gateway direct verifier executables"
+                    .into(),
+            );
+        }
+        if nix::unistd::Uid::effective().is_root() {
+            return Err("isolated Supernode gateway must use an unprivileged OS UID".into());
+        }
+        let uid: u32 = env::var("SUPERNODE_STATEMENT_VERIFIER_UID")?.parse()?;
+        let runner = StatementRunner::Isolated(IsolatedStatementRunner::new(socket.into(), uid)?);
+        return Ok(StatementVerifiers::new(runner, nova, payment)?);
+    }
+    if env::var("SUPERNODE_ALLOW_SAME_UID_STATEMENT_VERIFIER").as_deref() != Ok("1") {
+        return Err(
+            "direct same-UID statement verifiers require explicit development opt-in".into(),
+        );
+    }
+    let work_dir = dir.ok_or("direct statement verifiers require SUPERNODE_STATEMENT_DIR")?;
+    let nova_program = match program("SUPERNODE_NOVA")? {
+        Some(program) => Some(NovaProgram {
+            program,
+            vk_path: env::var("SUPERNODE_NOVA_VK")?.into(),
+        }),
         None => None,
     };
-    Ok(StatementVerifiers::new(dir, nova, payment)?)
+    let runner = StatementRunner::Direct {
+        work_dir: work_dir.into(),
+        nova: nova_program,
+        payment: program("SUPERNODE_PAYMENT")?,
+    };
+    Ok(StatementVerifiers::new(runner, nova, payment)?)
 }
 
 #[tokio::main]
@@ -110,7 +147,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if env::var("SUPERNODE_ARTIFACT_DIR").is_ok() && control.is_none() {
         return Err("SUPERNODE_CONTROL_TOKEN is required when artifact storage is enabled".into());
     }
-    if env::var("SUPERNODE_STATEMENT_DIR").is_ok() && control.is_none() {
+    let statement_dir = env::var("SUPERNODE_STATEMENT_DIR").ok();
+    let statements_enabled =
+        statement_dir.is_some() || env::var("SUPERNODE_STATEMENT_VERIFIER_SOCKET").is_ok();
+    if statements_enabled && control.is_none() {
         return Err(
             "SUPERNODE_CONTROL_TOKEN is required when statement verifiers are enabled".into(),
         );
@@ -118,8 +158,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(control) = control {
         gateway = gateway.with_control_token(control)?;
     }
-    if let Ok(dir) = env::var("SUPERNODE_STATEMENT_DIR") {
-        gateway = gateway.with_statement_verifiers(Arc::new(statement_verifiers(dir.into())?));
+    if statements_enabled {
+        gateway = gateway.with_statement_verifiers(Arc::new(statement_verifiers(statement_dir)?));
     }
     let mut artifacts = None;
     if let Ok(root) = env::var("SUPERNODE_ARTIFACT_DIR") {

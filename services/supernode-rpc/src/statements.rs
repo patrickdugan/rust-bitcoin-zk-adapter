@@ -16,6 +16,11 @@
 //! 1. the pinned verifier executable accepts the bundle;
 //! 2. its typed receipt binds the submitted bytes and the pinned keys;
 //! 3. every chain claim (height, hash and chainwork) matches Core at lookup.
+//!
+//! The pinned executables run either as gateway children (`Direct`, for
+//! tests and development) or behind the separate-UID statement verifier
+//! broker (`Isolated`), which holds no Core credentials. Either way the
+//! gateway checks the receipt and binds it to Core itself.
 use crate::{verification::file_digest, CoreRpc, RpcError};
 use bitcoin::hashes::{sha256, Hash};
 use serde::{Deserialize, Serialize};
@@ -97,8 +102,6 @@ impl PinnedProgram {
 /// proof, so only pinned checkpoint states are accepted.
 #[derive(Clone, Debug)]
 pub struct NovaPolicy {
-    pub program: PinnedProgram,
-    pub vk_path: PathBuf,
     pub vk_sha256: String,
     /// SHA-256 of the 17 checkpoint field elements (`checkpoint_state_sha256`).
     pub checkpoints: Vec<String>,
@@ -108,7 +111,6 @@ pub struct NovaPolicy {
 /// identities its statement must commit.
 #[derive(Clone, Debug)]
 pub struct PaymentPolicy {
-    pub program: PinnedProgram,
     /// `0x`-prefixed bytes32 key of the payment program.
     pub pay_vkey: String,
     pub node_program_words: String,
@@ -289,10 +291,38 @@ impl PaymentReceipt {
     }
 }
 
+/// The Nova verifier executable and the key file it loads.
+#[derive(Clone, Debug)]
+pub struct NovaProgram {
+    pub program: PinnedProgram,
+    pub vk_path: PathBuf,
+}
+
+/// How a bundle reaches its pinned verifier executable.
+pub enum StatementRunner {
+    /// Child processes of the gateway, under its UID: tests and development.
+    Direct {
+        work_dir: PathBuf,
+        nova: Option<NovaProgram>,
+        payment: Option<PinnedProgram>,
+    },
+    /// The separate-UID statement verifier broker, which owns the
+    /// executables, the Nova key file and the payment program key.
+    #[cfg(unix)]
+    Isolated(crate::statement_broker::IsolatedStatementRunner),
+}
+
+/// What one verifier run produced.
+struct RunOutput {
+    success: bool,
+    status: String,
+    stdout: Vec<u8>,
+}
+
 /// Verifiers configured by the operator; at most one verification runs at a
 /// time per gateway, since a Nova check loads a ~250 MB verifier key.
 pub struct StatementVerifiers {
-    work_dir: PathBuf,
+    runner: StatementRunner,
     nova: Option<NovaPolicy>,
     payment: Option<PaymentPolicy>,
     slots: Semaphore,
@@ -301,25 +331,46 @@ pub struct StatementVerifiers {
 
 impl StatementVerifiers {
     pub fn new(
-        work_dir: PathBuf,
+        runner: StatementRunner,
         nova: Option<NovaPolicy>,
         payment: Option<PaymentPolicy>,
     ) -> Result<Self, String> {
-        if !work_dir.is_absolute() {
-            return Err("statement work directory must be absolute".into());
-        }
-        fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
-        if let Some(ref p) = nova {
-            p.program.validate()?;
-            if !p.vk_path.is_absolute() || file_digest_any(&p.vk_path)? != p.vk_sha256 {
-                return Err("Nova verifier key differs from its SHA-256 pin".into());
+        // On non-Unix targets Direct is the only runner.
+        #[allow(irrefutable_let_patterns)]
+        if let StatementRunner::Direct {
+            work_dir,
+            nova: nova_program,
+            payment: payment_program,
+        } = &runner
+        {
+            if !work_dir.is_absolute() {
+                return Err("statement work directory must be absolute".into());
             }
-            if p.checkpoints.is_empty() || !p.checkpoints.iter().all(|c| valid_hash(c)) {
+            fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
+            if nova.is_some() != nova_program.is_some()
+                || payment.is_some() != payment_program.is_some()
+            {
+                return Err("each statement policy needs exactly one verifier program".into());
+            }
+            if let (Some(p), Some(n)) = (&nova, nova_program) {
+                n.program.validate()?;
+                if !n.vk_path.is_absolute() || file_digest_any(&n.vk_path)? != p.vk_sha256 {
+                    return Err("Nova verifier key differs from its SHA-256 pin".into());
+                }
+            }
+            if let Some(p) = payment_program {
+                p.validate()?;
+            }
+        }
+        if let Some(ref p) = nova {
+            if !valid_hash(&p.vk_sha256)
+                || p.checkpoints.is_empty()
+                || !p.checkpoints.iter().all(|c| valid_hash(c))
+            {
                 return Err("Nova policy requires at least one pinned checkpoint digest".into());
             }
         }
         if let Some(ref p) = payment {
-            p.program.validate()?;
             let key_ok = p.pay_vkey.len() == 66
                 && p.pay_vkey.starts_with("0x")
                 && valid_hash(&p.pay_vkey[2..]);
@@ -339,7 +390,7 @@ impl StatementVerifiers {
             return Err("no statement verifier configured".into());
         }
         Ok(Self {
-            work_dir,
+            runner,
             nova,
             payment,
             slots: Semaphore::new(1),
@@ -354,6 +405,7 @@ impl StatementVerifiers {
             })),
             "sp1_btc_payment_v1": self.payment.as_ref().map(|p| json!({"pay_vkey":p.pay_vkey})),
             "nova_spv_payment_v1": self.nova.is_some(),
+            "separate_uid_verifier": !matches!(self.runner, StatementRunner::Direct { .. }),
             "max_nova_bundle_bytes":MAX_NOVA_BUNDLE_BYTES,
             "payment_bundle_bytes":PAYMENT_BUNDLE_BYTES
         })
@@ -392,12 +444,7 @@ impl StatementVerifiers {
                 if bundle.len() != PAYMENT_BUNDLE_BYTES {
                     return Err("BPG1 bundle must be 709 bytes".into());
                 }
-                policy.program.validate()?;
-                let bytes = self
-                    .run(&policy.program, bundle, |path| {
-                        vec![path.as_os_str().to_owned(), policy.pay_vkey.clone().into()]
-                    })
-                    .await?;
+                let bytes = self.run(StatementKind::Sp1Payment, bundle).await?;
                 let receipt: PaymentReceipt =
                     serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
                 receipt.validate(policy, bundle)?;
@@ -415,17 +462,7 @@ impl StatementVerifiers {
         if bundle.len() > MAX_NOVA_BUNDLE_BYTES || bundle.len() <= NHC1_HEADER_BYTES {
             return Err("NHC1 bundle size out of range".into());
         }
-        policy.program.validate()?;
-        let bytes = self
-            .run(&policy.program, bundle, |path| {
-                vec![
-                    "verify-bundle".into(),
-                    path.as_os_str().to_owned(),
-                    "--vk".into(),
-                    policy.vk_path.as_os_str().to_owned(),
-                ]
-            })
-            .await?;
+        let bytes = self.run(StatementKind::NovaHeaders, bundle).await?;
         let receipt: NovaHeaderReceipt =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         receipt.validate(&policy.vk_sha256, checkpoints, bundle)?;
@@ -495,18 +532,86 @@ impl StatementVerifiers {
         })
     }
 
-    /// Write the bundle to a fresh file, run the verifier with stdout to a
-    /// fresh file, and return the bounded stdout of an accepting run.
-    async fn run(
+    /// Run the pinned verifier for `kind` (directly or through the broker)
+    /// and return the bounded stdout of an accepting run.
+    async fn run(&self, kind: StatementKind, bundle: &[u8]) -> Result<Vec<u8>, String> {
+        let out = match &self.runner {
+            StatementRunner::Direct {
+                work_dir,
+                nova,
+                payment,
+            } => match kind {
+                StatementKind::NovaHeaders => {
+                    let n = nova.as_ref().ok_or("Nova verifier is not configured")?;
+                    n.program.validate()?;
+                    self.run_direct(work_dir, &n.program, bundle, |path| {
+                        vec![
+                            "verify-bundle".into(),
+                            path.as_os_str().to_owned(),
+                            "--vk".into(),
+                            n.vk_path.as_os_str().to_owned(),
+                        ]
+                    })
+                    .await?
+                }
+                StatementKind::Sp1Payment => {
+                    let (program, policy) = payment
+                        .as_ref()
+                        .zip(self.payment.as_ref())
+                        .ok_or("payment verifier is not configured")?;
+                    program.validate()?;
+                    self.run_direct(work_dir, program, bundle, |path| {
+                        vec![path.as_os_str().to_owned(), policy.pay_vkey.clone().into()]
+                    })
+                    .await?
+                }
+                StatementKind::NovaSpvPayment => {
+                    return Err("NSP1 bundles are verified in parts".into())
+                }
+            },
+            #[cfg(unix)]
+            StatementRunner::Isolated(broker) => {
+                let name = match kind {
+                    StatementKind::NovaHeaders => "nova_header_chain_v1",
+                    StatementKind::Sp1Payment => "sp1_btc_payment_v1",
+                    StatementKind::NovaSpvPayment => {
+                        return Err("NSP1 bundles are verified in parts".into())
+                    }
+                };
+                let (success, status, stdout) = broker.run(name, bundle).await?;
+                RunOutput {
+                    success,
+                    status,
+                    stdout,
+                }
+            }
+        };
+        if out.stdout.len() as u64 > MAX_RECEIPT_BYTES {
+            return Err("statement verifier receipt exceeds size limit".into());
+        }
+        if !out.success {
+            let reason = serde_json::from_slice::<Value>(&out.stdout)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(|s| s.chars().take(200).collect()))
+                .unwrap_or(out.status);
+            return Err(format!("proof rejected: {reason}"));
+        }
+        Ok(out.stdout)
+    }
+
+    /// Write the bundle to a fresh file and run the verifier as a gateway
+    /// child with stdout to a fresh file.
+    async fn run_direct(
         &self,
+        work_dir: &Path,
         program: &PinnedProgram,
         bundle: &[u8],
         args: impl FnOnce(&Path) -> Vec<std::ffi::OsString>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<RunOutput, String> {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         let stem = format!("{}-{}-{n}", sha_hex(bundle), std::process::id());
-        let input = self.work_dir.join(format!("{stem}.bundle"));
-        let output = self.work_dir.join(format!("{stem}.receipt"));
+        let input = work_dir.join(format!("{stem}.bundle"));
+        let output = work_dir.join(format!("{stem}.receipt"));
         let result = async {
             let create = |p: &Path| {
                 OpenOptions::new()
@@ -539,17 +644,11 @@ impl StatementVerifiers {
                 .take(MAX_RECEIPT_BYTES + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|e| e.to_string())?;
-            if bytes.len() as u64 > MAX_RECEIPT_BYTES {
-                return Err("statement verifier receipt exceeds size limit".into());
-            }
-            if !status.success() {
-                let reason = serde_json::from_slice::<Value>(&bytes)
-                    .ok()
-                    .and_then(|v| v["error"].as_str().map(|s| s.chars().take(200).collect()))
-                    .unwrap_or_else(|| status.to_string());
-                return Err(format!("proof rejected: {reason}"));
-            }
-            Ok(bytes)
+            Ok(RunOutput {
+                success: status.success(),
+                status: status.to_string(),
+                stdout: bytes,
+            })
         }
         .await;
         let _ = fs::remove_file(&input);
@@ -814,17 +913,8 @@ mod tests {
     const PAYMENT_BUNDLE: &[u8] =
         include_bytes!("../../../integrations/sp1-btc-payment/fixtures/payment.bpg1");
 
-    fn program() -> PinnedProgram {
-        PinnedProgram {
-            executable: PathBuf::from("/unused"),
-            binary_sha256: "00".repeat(32),
-        }
-    }
-
     pub(crate) fn nova_policy() -> NovaPolicy {
         NovaPolicy {
-            program: program(),
-            vk_path: PathBuf::from("/unused"),
             vk_sha256: "e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698".into(),
             checkpoints: vec![
                 "3e53c33057b13ffecca476024bc78962b624814f41ac9d39e127e8f5a51a507e".into(),
@@ -834,7 +924,6 @@ mod tests {
 
     pub(crate) fn payment_policy() -> PaymentPolicy {
         PaymentPolicy {
-            program: program(),
             pay_vkey: "0x00de861a80542b3089fed26b37ac4e1f4bb8664dcddadb3a6de5ae7205751e75".into(),
             node_program_words: "a95b1a6090a64052fb6c2c12a0c5c861843a8b04b68e2218f77c9c4693510d76"
                 .into(),

@@ -9,6 +9,9 @@ unchanged.
 
 The gateway, proof-producing worker broker, and Cairo/STWO verifier run as
 `supernode-gateway`, `supernode-fetch`, and `supernode-verify`, respectively.
+The optional statement verifier (`supernode-statement-verifier.service`) runs
+the Nova and SP1 payment verifiers as a fourth identity,
+`supernode-stmt-verify`, with no network and no Core credentials.
 `supernode-ipc` is the group used for the two broker sockets. The kernel
 peer-UID checks remain mandatory even when socket group access is granted.
 
@@ -24,6 +27,7 @@ Service settings must match the Rust configuration:
 | Gateway | `SUPERNODE_JOB_DIR=/var/lib/supernode-gateway/jobs`, `SUPERNODE_ARTIFACT_DIR=/var/lib/supernode-gateway/artifacts`, `SUPERNODE_PROOF_BROKER_SOCKET=/run/supernode-worker/socket/broker.sock`, `SUPERNODE_PROOF_VERIFIER_SOCKET=/run/supernode-verify/socket/verify.sock` |
 | Producer | `SUPERNODE_BROKER_STAGING_DIR=/var/lib/supernode-worker/staging`, `SUPERNODE_BROKER_SOCKET=/run/supernode-worker/socket/broker.sock` |
 | Verifier | `SUPERNODE_VERIFY_STAGING_DIR=/var/lib/supernode-verify/staging`, `SUPERNODE_VERIFY_SOCKET=/run/supernode-verify/socket/verify.sock` |
+| Statement verifier (optional) | `SUPERNODE_STATEMENT_VERIFY_STAGING_DIR=/var/lib/supernode-stmt-verify/staging`, `SUPERNODE_STATEMENT_VERIFY_SOCKET=/run/supernode-stmt-verify/socket/statements.sock`; the gateway sets `SUPERNODE_STATEMENT_VERIFIER_SOCKET` to the same path and `SUPERNODE_STATEMENT_VERIFIER_UID` (see `docs/BITCOIN_STATEMENTS.md`) |
 
 The gateway must also configure the broker and verifier UIDs (available via
 `id -u`) and a read token distinct from the control token. The verifier

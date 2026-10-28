@@ -1,19 +1,24 @@
 name: Bitcoin statement proofs (real proofs)
 # Builds both statement verifiers from integrations/, checks the real mainnet
 # fixtures with each, then drives zk.statement.verify end to end through the
-# gateway against a mock Core serving the proven chain points.
+# gateway against a mock Core serving the proven chain points: directly, then
+# through the separate-UID statement verifier broker.
 on:
   push:
     paths:
       - 'integrations/nova-header-chain/**'
       - 'integrations/sp1-btc-payment/**'
       - 'services/supernode-rpc/**'
+      - 'services/statement-verifier-broker/**'
+      - 'integrations/worker-broker-protocol/**'
       - '.github/workflows/bitcoin-statements.yml'
   pull_request:
     paths:
       - 'integrations/nova-header-chain/**'
       - 'integrations/sp1-btc-payment/**'
       - 'services/supernode-rpc/**'
+      - 'services/statement-verifier-broker/**'
+      - 'integrations/worker-broker-protocol/**'
       - '.github/workflows/bitcoin-statements.yml'
   workflow_dispatch:
 permissions:
@@ -49,3 +54,10 @@ jobs:
           SUPERNODE_TEST_NOVA_VERIFIER: ${{ github.workspace }}/integrations/nova-header-chain/target/release/btc-header-fold
           SUPERNODE_TEST_NOVA_VK: ${{ runner.temp }}/nova_vk.bin
         run: cargo test --test statements_gateway -- --nocapture
+      - name: Gateway end to end through the separate-UID statement verifier
+        run: |
+          cargo build --manifest-path services/statement-verifier-broker/Cargo.toml
+          bash services/statement-verifier-broker/test-separated-uids.sh \
+            integrations/nova-header-chain/target/release/btc-header-fold \
+            integrations/sp1-btc-payment/target/release/btc-pay-verify \
+            "$RUNNER_TEMP/nova_vk.bin"

@@ -3,7 +3,8 @@
 [Unit]
 Description=Bitcoin Supernode authenticated Rust RPC gateway
 Wants=network-online.target
-After=network-online.target supernode-proof-worker-broker.service supernode-raito-verifier.service
+# Ordering only: the statement verifier is optional (SUPERNODE_STATEMENT_VERIFIER_SOCKET).
+After=network-online.target supernode-proof-worker-broker.service supernode-raito-verifier.service supernode-statement-verifier.service
 Requires=supernode-proof-worker-broker.service supernode-raito-verifier.service
 
 [Service]

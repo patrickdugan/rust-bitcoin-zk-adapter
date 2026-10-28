@@ -23,6 +23,8 @@ pub mod cache;
 pub mod chain;
 pub mod jobs;
 pub mod process;
+#[cfg(unix)]
+pub mod statement_broker;
 pub mod statements;
 pub mod verification;
 #[cfg(unix)]

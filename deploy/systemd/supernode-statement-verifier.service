@@ -1,0 +1,44 @@
+# Sample deployment only. The pinned btc-header-fold and btc-pay-verify
+# binaries and the Nova verifier key must be root-owned, immutable to the
+# verifier UID, and outside writable staging. This identity holds no
+# Bitcoin Core credentials.
+[Unit]
+Description=Bitcoin Supernode isolated statement verifier (Nova header chain, SP1 payment)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=supernode-stmt-verify
+Group=supernode-ipc
+EnvironmentFile=/etc/supernode/statement-verifier.env
+ExecStart=/opt/supernode/bin/supernode-statement-verifier-broker
+RuntimeDirectory=supernode-stmt-verify/socket
+RuntimeDirectoryMode=0770
+StateDirectory=supernode-stmt-verify/staging
+StateDirectoryMode=0700
+UMask=0007
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=64
+KillMode=control-group
+TimeoutStopSec=10s
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

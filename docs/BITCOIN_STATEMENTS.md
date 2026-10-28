@@ -107,33 +107,87 @@ Error codes:
 
 ## Operator configuration
 
-**Isolation status.** The statement verifiers run as child processes of the
-gateway: same identity, sandbox and `MemoryMax=2G` cgroup.
+**Isolation status.** In production the statement verifiers run behind
+`supernode-statement-verifier-broker`, under their own UID
+(`deploy/systemd/supernode-statement-verifier.service`). This mirrors the
+Raito path's `supernode-raito-verifier`.
 
-- A Nova check with a cached key stays under about 1.3 GB (measured with key
-  rebuild).
-- This is weaker than the Raito path, whose verifier runs under a separate
-  UID behind `supernode-raito-verifier`. A parser bug in a verifier would
-  run as the gateway identity.
-- **Follow-up:** move these verifiers behind the same verifier broker, so a
-  separate UID holds no Core credentials. Until then, enable them only where
-  that risk is acceptable.
-- In the sample unit, `SUPERNODE_STATEMENT_DIR` is
-  `/var/lib/supernode-gateway/statements`.
+- **What the broker does.** It is a dumb runner. It takes a kind
+  (`nova_header_chain_v1` or `sp1_btc_payment_v1`) and the bundle bytes over
+  a Unix socket, runs the pinned executable, and returns the exit status and
+  bounded stdout (at most 8 KiB). An NSP1 bundle reaches it as its two NHC1
+  parts.
+- **What it checks.** It checks the gateway's kernel peer UID, the binaries'
+  SHA-256 pins (again before each run) and the Nova key's pin. Each run gets
+  a private `0700` staging directory and its own process group, killed on
+  timeout (300 s) or gateway disconnect.
+- **What it owns.** The executables, the Nova key file and the payment
+  program key.
+- **What it lacks.** It has no Bitcoin Core credentials and, in the sample
+  unit, no network (`PrivateNetwork=yes`, `AF_UNIX` only). A parser bug in a
+  verifier therefore runs without the gateway's Core access.
+- **What the gateway still does.** It parses the typed receipt, checks it
+  against its own pins (bundle digest, verifier key, checkpoints, payment
+  program words), and binds it to Core. A compromised broker UID could
+  still forge a receipt; that is the same trust as the Raito verifier UID.
+- **Direct mode.** Running the verifiers as gateway children, under the
+  gateway UID, remains available for tests and development. It needs
+  `SUPERNODE_ALLOW_SAME_UID_STATEMENT_VERIFIER=1` and
+  `SUPERNODE_STATEMENT_DIR`.
+- **Tested.** CI (`bitcoin-statements.yml`) runs every real-fixture gateway
+  test both ways. The second pass runs them through the broker under a fresh
+  system user, which cannot read the gateway's credential file
+  (`services/statement-verifier-broker/test-separated-uids.sh`).
+- **Memory.** A Nova check with a cached key stays under about 1.3 GB; the
+  sample broker unit has `MemoryMax=2G`.
+
+Gateway (`gateway.env`), separate-UID mode:
 
 ```
-SUPERNODE_STATEMENT_DIR=/var/lib/supernode/statements   # absolute; needs SUPERNODE_CONTROL_TOKEN
+SUPERNODE_STATEMENT_VERIFIER_SOCKET=/run/supernode-stmt-verify/socket/statements.sock
+SUPERNODE_STATEMENT_VERIFIER_UID=<id -u supernode-stmt-verify>   # needs SUPERNODE_CONTROL_TOKEN
 
-SUPERNODE_NOVA_VERIFIER=/opt/zk/btc-header-fold
-SUPERNODE_NOVA_VERIFIER_SHA256=<sha256 of that binary>
-SUPERNODE_NOVA_VK=/opt/zk/nova_vk_k10.bin                # btc-header-fold vk-export 10 OUT
 SUPERNODE_NOVA_VK_SHA256=e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698
 SUPERNODE_NOVA_CHECKPOINTS=<checkpoint_state_sha256>[,<...>]
 
-SUPERNODE_PAYMENT_VERIFIER=/opt/zk/btc-pay-verify
-SUPERNODE_PAYMENT_VERIFIER_SHA256=<sha256 of that binary>
 SUPERNODE_PAYMENT_PAY_VKEY=0x00de861a80542b3089fed26b37ac4e1f4bb8664dcddadb3a6de5ae7205751e75
 SUPERNODE_PAYMENT_PROGRAM_WORDS=<node>,<leaf>,<segment>
+```
+
+A kind is enabled by its gateway pin (`SUPERNODE_NOVA_VK_SHA256`,
+`SUPERNODE_PAYMENT_PAY_VKEY`). The socket excludes the direct
+`SUPERNODE_{NOVA,PAYMENT}_VERIFIER` variables.
+
+Broker (`statement-verifier.env`):
+
+```
+SUPERNODE_STATEMENT_VERIFY_SOCKET=/run/supernode-stmt-verify/socket/statements.sock
+SUPERNODE_STATEMENT_VERIFY_STAGING_DIR=/var/lib/supernode-stmt-verify/staging
+SUPERNODE_STATEMENT_VERIFY_GATEWAY_UID=<id -u supernode-gateway>
+
+SUPERNODE_STATEMENT_NOVA_VERIFIER=/opt/zk/btc-header-fold
+SUPERNODE_STATEMENT_NOVA_VERIFIER_SHA256=<sha256 of that binary>
+SUPERNODE_STATEMENT_NOVA_VK=/opt/zk/nova_vk_k10.bin       # btc-header-fold vk-export 10 OUT
+SUPERNODE_STATEMENT_NOVA_VK_SHA256=e46bb06929d701f1986d320e004e8ed744b0e5f74eb9f5e9c9bd0e2fe6ad1698
+
+SUPERNODE_STATEMENT_PAYMENT_VERIFIER=/opt/zk/btc-pay-verify
+SUPERNODE_STATEMENT_PAYMENT_VERIFIER_SHA256=<sha256 of that binary>
+SUPERNODE_STATEMENT_PAYMENT_PAY_VKEY=0x00de861a80542b3089fed26b37ac4e1f4bb8664dcddadb3a6de5ae7205751e75
+```
+
+Direct mode (tests and development only; the verifiers run as the gateway UID):
+
+```
+SUPERNODE_ALLOW_SAME_UID_STATEMENT_VERIFIER=1
+SUPERNODE_STATEMENT_DIR=/var/lib/supernode-gateway/statements   # absolute
+
+SUPERNODE_NOVA_VERIFIER=/opt/zk/btc-header-fold
+SUPERNODE_NOVA_VERIFIER_SHA256=<sha256 of that binary>
+SUPERNODE_NOVA_VK=/opt/zk/nova_vk_k10.bin
+# plus the gateway pins above
+
+SUPERNODE_PAYMENT_VERIFIER=/opt/zk/btc-pay-verify
+SUPERNODE_PAYMENT_VERIFIER_SHA256=<sha256 of that binary>
 ```
 
 **Verifier key.** It is a deterministic function of the circuit shape. Linux
