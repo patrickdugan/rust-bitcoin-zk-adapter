@@ -32,12 +32,29 @@ refused, because it is ambiguous with an inner Merkle node.
 ## Request
 
 ```
-zk.statement.verify [kind, bundle_hex, expected_txid?, expected_vout?]
+zk.statement.verify [kind, bundle_hex, expected_txid?, expected_vout?,
+                     expected_script_sha256?, min_value_sats?, min_block_height?]
 ```
 
 - Requires the **control** token. A Nova check loads a large key, and only
   one verification runs at a time.
-- `expected_txid` and `expected_vout` apply to payments only.
+- The expectations apply to payments only. Pass `null` to skip any of them.
+- **Each expectation given must hold:**
+  - the proven output is `expected_txid:expected_vout`;
+  - it pays the script whose SHA-256 is `expected_script_sha256`;
+  - it carries at least `min_value_sats`;
+  - it sits in a block at or above `min_block_height`.
+
+  Otherwise the request fails with -32052. A payer that expects a fresh
+  deposit names the deposit script, the quoted amount and the height at which
+  the quote was issued. A valid proof of an older payment to the same script
+  then cannot be presented as the new one.
+- **Requiring a named outpoint.** With
+  `SUPERNODE_STATEMENT_REQUIRE_EXPECTED_OUTPUT=1`, a payment proof without
+  both `expected_txid` and `expected_vout` is refused with -32602 before any
+  verifier runs. `zk.statement.verify` capabilities report the setting as
+  `require_expected_output`. `zk.statement.balance` is unaffected: it sums
+  proofs and names no outpoint.
 
 A receipt is returned only when all of the following hold:
 
@@ -51,6 +68,13 @@ A receipt is returned only when all of the following hold:
      - Nova: the verifier-key SHA-256 and a pinned checkpoint-state digest;
      - payments: the payment program key, plus the node, leaf and segment
        program words committed in the statement.
+
+   **For SP1 payments, the gateway also decodes the 349-byte
+   `LIGHTO-BTC-PAYMENT-v1` statement itself** and requires every receipt
+   field to equal it: tip, block, txid, vout, value, script hash,
+   confirmations, start flag, program words. The verifier executable is
+   trusted to say whether the proof is valid, not to report what the proof
+   says.
 4. **Bitcoin Core agrees at lookup.**
    - For every proven point, `getblockhash(height)` equals the proven hash.
    - For each chain tip, `getblockheader(hash).chainwork` equals the proven
@@ -101,7 +125,7 @@ Error codes:
 | -32053 | rejected by the verifier, or receipt binding failed |
 | -32050 | not on the active chain |
 | -32051 | chainwork mismatch |
-| -32052 | wrong expected output |
+| -32052 | the proven output misses an expectation (outpoint, script, minimum value, minimum height) |
 | -32054 | Core's unspent output differs from the proven one |
 | -32002 | control token required |
 

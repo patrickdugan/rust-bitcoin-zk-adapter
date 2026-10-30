@@ -906,18 +906,21 @@ async fn proof_job_receipt(gateway: &Gateway, params: &Value) -> Result<Value, R
         .map_err(|error| RpcError::new(-32043, error))
 }
 
-/// `[kind, bundle_hex, expected_txid?, expected_vout?]`: verify a client
-/// proof with the operator-pinned verifier for `kind`, then bind every chain
-/// claim to Bitcoin Core's active chain at lookup.
+/// `[kind, bundle_hex, expected_txid?, expected_vout?, expected_script_sha256?,
+/// min_value_sats?, min_block_height?]`: verify a client proof with the
+/// operator-pinned verifier for `kind`, check the proven output against every
+/// expectation given, then bind every chain claim to Bitcoin Core's active
+/// chain at lookup.
 async fn verify_statement(gateway: &Gateway, params: &Value) -> Result<Value, RpcError> {
-    const USAGE: &str = "expected [kind, bundle_hex, expected_txid?, expected_vout?]";
+    const USAGE: &str = "expected [kind, bundle_hex, expected_txid?, expected_vout?, \
+                         expected_script_sha256?, min_value_sats?, min_block_height?]";
     let verifiers = gateway
         .statements
         .as_ref()
         .ok_or_else(|| RpcError::new(-32601, "statement verifiers not configured"))?;
     let args = params
         .as_array()
-        .filter(|a| (2..=4).contains(&a.len()))
+        .filter(|a| (2..=7).contains(&a.len()))
         .ok_or_else(|| RpcError::new(-32602, USAGE))?;
     let kind = statements::StatementKind::from_name(args[0].as_str().unwrap_or(""))
         .map_err(|e| RpcError::new(-32602, e))?;
@@ -939,20 +942,63 @@ async fn verify_statement(gateway: &Gateway, params: &Value) -> Result<Value, Rp
                 .ok_or_else(|| RpcError::new(-32602, "invalid expected output index"))?,
         ),
     };
-    if kind == statements::StatementKind::NovaHeaders
-        && (expected_txid.is_some() || expected_vout.is_some())
-    {
-        return Err(RpcError::new(-32602, "header-chain proofs take no output"));
+    let expected_script_sha256 = match args.get(4) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .filter(|s| {
+                    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                })
+                .ok_or_else(|| RpcError::new(-32602, "invalid expected script SHA-256"))?
+                .to_owned(),
+        ),
+    };
+    let min_value_sats = match args.get(5) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .ok_or_else(|| RpcError::new(-32602, "invalid minimum value"))?,
+        ),
+    };
+    let min_block_height = match args.get(6) {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| RpcError::new(-32602, "invalid minimum block height"))?,
+        ),
+    };
+    let expected = statements::ExpectedOutput {
+        txid: expected_txid,
+        vout: expected_vout,
+        script_sha256: expected_script_sha256,
+        min_value_sats,
+        min_block_height,
+    };
+    if kind == statements::StatementKind::NovaHeaders {
+        if !expected.is_empty() {
+            return Err(RpcError::new(-32602, "header-chain proofs take no output"));
+        }
+    } else if verifiers.requires_expected_output() && !expected.names_outpoint() {
+        return Err(RpcError::new(
+            -32602,
+            "this gateway accepts payment proofs only for a named expected_txid and expected_vout",
+        ));
     }
     let receipt = verifiers
         .verify(kind, &bundle)
         .await
         .map_err(|e| RpcError::new(-32053, e))?;
+    if let Some(output) = receipt.proven_output() {
+        expected
+            .check(&output)
+            .map_err(|e| RpcError::new(-32052, e))?;
+    }
     statements::bind_active_chain(
         &gateway.core,
         &receipt,
-        expected_txid.as_deref(),
-        expected_vout,
+        expected.txid.as_deref(),
+        expected.vout,
     )
     .await
 }

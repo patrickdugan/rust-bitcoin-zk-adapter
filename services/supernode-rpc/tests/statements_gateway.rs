@@ -192,12 +192,25 @@ async fn start(
     nova: Option<NovaPolicy>,
     payment: Option<PaymentPolicy>,
 ) -> Option<String> {
+    start_with(chain, txout, nova, payment, false).await
+}
+
+/// As `start`, optionally requiring a named outpoint for payment proofs.
+async fn start_with(
+    chain: Chain,
+    txout: TxOut,
+    nova: Option<NovaPolicy>,
+    payment: Option<PaymentPolicy>,
+    require_expected_output: bool,
+) -> Option<String> {
     let Some(runner) = runner(nova.is_some(), payment.is_some()) else {
         eprintln!("skipped: verifier variables unset");
         return None;
     };
     let core = CoreRpc::new(&mock_core(chain, txout).await, "u".into(), "p".into()).unwrap();
-    let verifiers = StatementVerifiers::new(runner, nova, payment).unwrap();
+    let verifiers = StatementVerifiers::new(runner, nova, payment)
+        .unwrap()
+        .with_required_expected_output(require_expected_output);
     let gateway = Gateway::new(core, READ.into(), 4)
         .unwrap()
         .with_control_token(CONTROL.into())
@@ -317,6 +330,76 @@ async fn real_payment_proof_is_verified_and_bound_to_core() {
     chain.lock().unwrap().get_mut(&959_994).unwrap().0 = "11".repeat(32);
     let reorg = call(&url, CONTROL, json!(["sp1_btc_payment_v1", bundle])).await;
     assert_eq!(reorg["error"]["code"], -32050, "{reorg}");
+}
+
+/// A gateway that requires a named outpoint refuses an unnamed payment proof
+/// before running the verifier, and every expectation given must hold.
+#[tokio::test]
+async fn real_payment_proof_honors_expected_output_requirements() {
+    let Some(url) = start_with(
+        payment_chain(),
+        unspent_txout(),
+        None,
+        Some(payment_policy()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let bundle = fixture("sp1-btc-payment/fixtures/payment.bpg1");
+    const SCRIPT: &str = "b05800113707606313240b35c1558aae55174be81765bcbfbff133961797a1b9";
+
+    for unnamed in [
+        json!(["sp1_btc_payment_v1", bundle]),
+        json!(["sp1_btc_payment_v1", bundle, TXID]),
+        json!(["sp1_btc_payment_v1", bundle, null, 0]),
+    ] {
+        let refused = call(&url, CONTROL, unnamed).await;
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    }
+
+    let exact = call(
+        &url,
+        CONTROL,
+        json!([
+            "sp1_btc_payment_v1",
+            bundle,
+            TXID,
+            0,
+            SCRIPT,
+            2_010_000,
+            959_984
+        ]),
+    )
+    .await;
+    assert_eq!(exact["result"]["proof_verified"], true, "{exact}");
+
+    for (name, params) in [
+        (
+            "script",
+            json!(["sp1_btc_payment_v1", bundle, TXID, 0, "ab".repeat(32)]),
+        ),
+        (
+            "value",
+            json!(["sp1_btc_payment_v1", bundle, TXID, 0, null, 2_010_001]),
+        ),
+        (
+            "height",
+            json!(["sp1_btc_payment_v1", bundle, TXID, 0, null, null, 959_985]),
+        ),
+    ] {
+        let missed = call(&url, CONTROL, params).await;
+        assert_eq!(missed["error"]["code"], -32052, "{name}: {missed}");
+    }
+
+    let malformed = call(
+        &url,
+        CONTROL,
+        json!(["sp1_btc_payment_v1", bundle, TXID, 0, "XYZ"]),
+    )
+    .await;
+    assert_eq!(malformed["error"]["code"], -32602, "{malformed}");
 }
 
 #[tokio::test]

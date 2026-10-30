@@ -43,6 +43,14 @@ pub const PAYMENT_VERIFIER: &str = "sp1-verifier 6.9.0 groth16 bn254";
 const NHC1_HEADER_BYTES: usize = 12 + 17 * 32;
 pub const MAX_NOVA_BUNDLE_BYTES: usize = 24 * 1024;
 pub const PAYMENT_BUNDLE_BYTES: usize = 709;
+/// BPG1: 4-byte magic, 356-byte Groth16 proof, then the payment statement.
+const PAYMENT_STATEMENT_OFFSET: usize = 4 + 356;
+/// The `LIGHTO-BTC-PAYMENT-v1` statement committed by the SP1 payment
+/// program (Raito-Scrypt `chain-sp1/pay-core`): domain, three program words,
+/// top digest, start flag, tip, block, txid, vout, value, script length and
+/// hash, confirmations.
+const PAYMENT_STATEMENT_BYTES: usize = 349;
+const PAYMENT_STATEMENT_DOMAIN: &[u8; 32] = b"LIGHTO-BTC-PAYMENT-v1\0\0\0\0\0\0\0\0\0\0\0";
 pub const SPV_PAYMENT_STATEMENT: &str = "btc_nova_spv_payment_v1";
 pub const MAX_SPV_BUNDLE_BYTES: usize = 30 * 1024;
 const MAX_SPV_TX_BYTES: usize = 4096;
@@ -76,6 +84,11 @@ fn valid_hash(value: &str) -> bool {
 
 fn sha_hex(bytes: &[u8]) -> String {
     sha256::Hash::hash(bytes).to_string()
+}
+
+/// Hex of a 32-byte hash in display (reversed) order, as Bitcoin prints it.
+fn display_hex(bytes: &[u8]) -> String {
+    hex::encode(bytes.iter().rev().copied().collect::<Vec<u8>>())
 }
 
 /// A verifier executable the operator pinned by SHA-256.
@@ -287,6 +300,84 @@ impl PaymentReceipt {
         {
             return Err("payment receipt does not bind the bundle and pinned programs".into());
         }
+        self.matches_statement(&bundle[PAYMENT_STATEMENT_OFFSET..])
+    }
+
+    /// Every field the statement determines must equal the bytes the proof
+    /// commits to. The gateway decodes them itself (offsets as in Raito-Scrypt
+    /// `pay-verify`), so it trusts the verifier executable for proof validity
+    /// only, not for reporting what the proof says.
+    fn matches_statement(&self, s: &[u8]) -> Result<(), String> {
+        if s.len() != PAYMENT_STATEMENT_BYTES || &s[..32] != PAYMENT_STATEMENT_DOMAIN {
+            return Err("bundle does not carry a LIGHTO-BTC-PAYMENT-v1 statement".into());
+        }
+        let u32_at = |at: usize| u32::from_le_bytes(s[at..at + 4].try_into().unwrap());
+        let mut tip_work = s[197..229].to_vec();
+        tip_work.reverse();
+        let same = self.node_program_words == hex::encode(&s[32..64])
+            && self.leaf_program_words == hex::encode(&s[64..96])
+            && self.segment_program_words == hex::encode(&s[96..128])
+            && s[160] <= 1
+            && self.start_is_genesis == (s[160] == 1)
+            && self.tip_height == u32_at(161)
+            && self.tip_hash == display_hex(&s[165..197])
+            && self.tip_chainwork == hex::encode(&tip_work)
+            && self.block_height == u32_at(229)
+            && self.block_hash == display_hex(&s[233..265])
+            && self.txid == display_hex(&s[265..297])
+            && self.vout == u32_at(297)
+            && self.value_sats == u64::from_le_bytes(s[301..309].try_into().unwrap())
+            && self.script_sha256 == hex::encode(&s[313..345])
+            && self.confirmations == u32_at(345);
+        if !same {
+            return Err("payment receipt fields differ from the proven statement bytes".into());
+        }
+        Ok(())
+    }
+}
+
+/// What a caller requires of a proven payment output. Every field is
+/// optional; `zk.statement.verify` refuses a proof that misses any one given.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpectedOutput {
+    pub txid: Option<String>,
+    pub vout: Option<u32>,
+    pub script_sha256: Option<String>,
+    pub min_value_sats: Option<u64>,
+    pub min_block_height: Option<u32>,
+}
+
+impl ExpectedOutput {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether the caller named one outpoint. A gateway configured with
+    /// `require_expected_output` accepts payment proofs only then, so a valid
+    /// proof of some other payment cannot be passed off as the one awaited.
+    pub fn names_outpoint(&self) -> bool {
+        self.txid.is_some() && self.vout.is_some()
+    }
+
+    pub fn check(&self, out: &ProvenOutput) -> Result<(), String> {
+        if self.txid.as_ref().is_some_and(|t| *t != out.txid)
+            || self.vout.is_some_and(|v| v != out.vout)
+        {
+            return Err("proven output is not the expected one".into());
+        }
+        if self
+            .script_sha256
+            .as_ref()
+            .is_some_and(|s| *s != out.script_sha256)
+        {
+            return Err("proven output pays a different script".into());
+        }
+        if self.min_value_sats.is_some_and(|m| out.value_sats < m) {
+            return Err("proven value is below the required minimum".into());
+        }
+        if self.min_block_height.is_some_and(|h| out.block_height < h) {
+            return Err("proven payment is in a block below the required height".into());
+        }
         Ok(())
     }
 }
@@ -325,6 +416,7 @@ pub struct StatementVerifiers {
     runner: StatementRunner,
     nova: Option<NovaPolicy>,
     payment: Option<PaymentPolicy>,
+    require_expected_output: bool,
     slots: Semaphore,
     counter: AtomicU64,
 }
@@ -393,9 +485,22 @@ impl StatementVerifiers {
             runner,
             nova,
             payment,
+            require_expected_output: false,
             slots: Semaphore::new(1),
             counter: AtomicU64::new(0),
         })
+    }
+
+    /// Accept payment proofs only for a caller-named outpoint:
+    /// `zk.statement.verify` then requires `expected_txid` and `expected_vout`
+    /// (`SUPERNODE_STATEMENT_REQUIRE_EXPECTED_OUTPUT=1`).
+    pub fn with_required_expected_output(mut self, required: bool) -> Self {
+        self.require_expected_output = required;
+        self
+    }
+
+    pub fn requires_expected_output(&self) -> bool {
+        self.require_expected_output
     }
 
     pub fn capabilities(&self) -> Value {
@@ -405,6 +510,7 @@ impl StatementVerifiers {
             })),
             "sp1_btc_payment_v1": self.payment.as_ref().map(|p| json!({"pay_vkey":p.pay_vkey})),
             "nova_spv_payment_v1": self.nova.is_some(),
+            "require_expected_output": self.require_expected_output,
             "separate_uid_verifier": !matches!(self.runner, StatementRunner::Direct { .. }),
             "max_nova_bundle_bytes":MAX_NOVA_BUNDLE_BYTES,
             "payment_bundle_bytes":PAYMENT_BUNDLE_BYTES
@@ -1004,6 +1110,92 @@ mod tests {
         let mut lie = receipt;
         lie.confirmations = 12;
         assert!(lie.validate(&policy, PAYMENT_BUNDLE).is_err());
+    }
+
+    /// A verifier report that misstates what the proven statement says is
+    /// refused, even though it binds the right bundle and keys.
+    #[test]
+    fn payment_receipt_fields_must_equal_the_statement_bytes() {
+        let receipt: PaymentReceipt = serde_json::from_str(PAYMENT_RECEIPT).unwrap();
+        let policy = payment_policy();
+        let other = "ab".repeat(32);
+        type Lie<'a> = Box<dyn Fn(&mut PaymentReceipt) + 'a>;
+        let lies: Vec<(&str, Lie)> = vec![
+            ("txid", Box::new(|r| r.txid = other.clone())),
+            ("vout", Box::new(|r| r.vout = 1)),
+            ("value", Box::new(|r| r.value_sats = 2_010_001)),
+            ("script", Box::new(|r| r.script_sha256 = other.clone())),
+            ("block hash", Box::new(|r| r.block_hash = other.clone())),
+            ("tip hash", Box::new(|r| r.tip_hash = other.clone())),
+            (
+                "tip work",
+                Box::new(|r| r.tip_chainwork = "0".repeat(63) + "1"),
+            ),
+            ("genesis", Box::new(|r| r.start_is_genesis = true)),
+            (
+                // Shifted together, so the confirmation count stays consistent.
+                "heights",
+                Box::new(|r| {
+                    r.block_height += 1;
+                    r.tip_height += 1;
+                }),
+            ),
+        ];
+        for (name, lie) in lies {
+            let mut r = receipt.clone();
+            lie(&mut r);
+            let err = r.validate(&policy, PAYMENT_BUNDLE).unwrap_err();
+            assert!(err.contains("statement bytes"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn expected_output_checks_each_requirement() {
+        let receipt: PaymentReceipt = serde_json::from_str(PAYMENT_RECEIPT).unwrap();
+        let out = StatementReceipt::Sp1Payment(receipt)
+            .proven_output()
+            .unwrap();
+        let exact = ExpectedOutput {
+            txid: Some(out.txid.clone()),
+            vout: Some(0),
+            script_sha256: Some(out.script_sha256.clone()),
+            min_value_sats: Some(2_010_000),
+            min_block_height: Some(959_984),
+        };
+        assert!(exact.names_outpoint() && !exact.is_empty());
+        exact.check(&out).unwrap();
+        ExpectedOutput::default().check(&out).unwrap();
+        assert!(!ExpectedOutput::default().names_outpoint());
+        let misses = [
+            ExpectedOutput {
+                vout: Some(1),
+                ..exact.clone()
+            },
+            ExpectedOutput {
+                txid: Some("ab".repeat(32)),
+                ..exact.clone()
+            },
+            ExpectedOutput {
+                script_sha256: Some("ab".repeat(32)),
+                ..exact.clone()
+            },
+            ExpectedOutput {
+                min_value_sats: Some(2_010_001),
+                ..exact.clone()
+            },
+            ExpectedOutput {
+                min_block_height: Some(959_985),
+                ..exact.clone()
+            },
+        ];
+        for miss in misses {
+            assert!(miss.check(&out).is_err(), "{miss:?}");
+        }
+        let txid_only = ExpectedOutput {
+            txid: Some(out.txid.clone()),
+            ..Default::default()
+        };
+        assert!(!txid_only.names_outpoint());
     }
 
     #[test]

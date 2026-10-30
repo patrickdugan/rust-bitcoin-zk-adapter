@@ -89,7 +89,8 @@ fn statement_verifiers(dir: Option<String>) -> Result<StatementVerifiers, Box<dy
         }
         let uid: u32 = env::var("SUPERNODE_STATEMENT_VERIFIER_UID")?.parse()?;
         let runner = StatementRunner::Isolated(IsolatedStatementRunner::new(socket.into(), uid)?);
-        return Ok(StatementVerifiers::new(runner, nova, payment)?);
+        return Ok(StatementVerifiers::new(runner, nova, payment)?
+            .with_required_expected_output(require_expected_output()));
     }
     if env::var("SUPERNODE_ALLOW_SAME_UID_STATEMENT_VERIFIER").as_deref() != Ok("1") {
         return Err(
@@ -109,7 +110,14 @@ fn statement_verifiers(dir: Option<String>) -> Result<StatementVerifiers, Box<dy
         nova: nova_program,
         payment: program("SUPERNODE_PAYMENT")?,
     };
-    Ok(StatementVerifiers::new(runner, nova, payment)?)
+    Ok(StatementVerifiers::new(runner, nova, payment)?
+        .with_required_expected_output(require_expected_output()))
+}
+
+/// `SUPERNODE_STATEMENT_REQUIRE_EXPECTED_OUTPUT=1`: payment proofs are
+/// accepted only for a caller-named outpoint (any other value leaves it off).
+fn require_expected_output() -> bool {
+    env::var("SUPERNODE_STATEMENT_REQUIRE_EXPECTED_OUTPUT").as_deref() == Ok("1")
 }
 
 #[tokio::main]
