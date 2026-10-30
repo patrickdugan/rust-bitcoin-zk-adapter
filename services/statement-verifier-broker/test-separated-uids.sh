@@ -105,7 +105,7 @@ if grep -q "skipped" "$tmp/gateway-tests.log"; then
   echo "FAIL a gateway test skipped instead of using the broker" >&2
   exit 1
 fi
-grep -q "test result: ok. 4 passed" "$tmp/gateway-tests.log"
+grep -q "test result: ok. 5 passed" "$tmp/gateway-tests.log"
 if [[ -n "$(sudo ls -A "$tmp/staging")" ]]; then
   echo "FAIL broker left staging files behind" >&2
   exit 1
